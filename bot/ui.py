@@ -9,11 +9,11 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
-    KeyboardButtonRequestUsers,
     ReplyKeyboardMarkup,
     WebAppInfo,
 )
 
+from .access import Access
 from .config import Config
 from .db import Ticket
 
@@ -25,59 +25,41 @@ BTN_STATS = "📊 Статистика"
 BTN_ADMINS = "👥 Админы"
 BTN_DESIGN = "🎨 Дизайн билета"
 BTN_RESET = "🗑 Сброс списка"
-BTN_CANCEL = "❌ Отмена"
-BTN_PICK_USER = "👤 Выбрать пользователя"
 
 MENU_TEXTS = {
     BTN_NEW, BTN_SCAN, BTN_LIST, BTN_SEARCH, BTN_STATS,
-    BTN_ADMINS, BTN_DESIGN, BTN_RESET, BTN_CANCEL,
+    BTN_ADMINS, BTN_DESIGN, BTN_RESET,
 }
 # Обычный текст, введённый пользователем (не кнопка меню и не команда).
 PLAIN_TEXT = F.text & ~F.text.in_(MENU_TEXTS) & ~F.text.startswith("/")
-
 
 # Адрес страницы-сканера (мини-приложение Telegram). Задаётся при запуске из
 # настроек; если пуст — кнопка «Сканировать» работает как обычная текстовая.
 scanner_url = ""
 
 
-def main_menu(is_main: bool) -> ReplyKeyboardMarkup:
-    scan = KeyboardButton(
-        text=BTN_SCAN, web_app=WebAppInfo(url=scanner_url) if scanner_url else None
-    )
-    rows = [
-        [KeyboardButton(text=BTN_NEW), scan],
-        [KeyboardButton(text=BTN_LIST), KeyboardButton(text=BTN_SEARCH)],
-        [KeyboardButton(text=BTN_STATS)],
-    ]
-    if is_main:
-        rows[-1].append(KeyboardButton(text=BTN_ADMINS))
-        rows.append([KeyboardButton(text=BTN_DESIGN), KeyboardButton(text=BTN_RESET)])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
-
-
-def cancel_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BTN_CANCEL)]], resize_keyboard=True
-    )
-
-
-def pick_user_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(
-                    text=BTN_PICK_USER,
-                    request_users=KeyboardButtonRequestUsers(
-                        request_id=1, user_is_bot=False, max_quantity=1,
-                        request_name=True,
-                    ),
-                )
-            ],
-            [KeyboardButton(text=BTN_CANCEL)],
-        ],
-        resize_keyboard=True,
-    )
+def main_menu(access: Access) -> ReplyKeyboardMarkup:
+    """Главное меню: только разделы, на которые у админа есть разрешение.
+    «Список» и «Поиск» есть у всех — без разрешения они показывают свои билеты."""
+    buttons = []
+    if access.can("new"):
+        buttons.append(KeyboardButton(text=BTN_NEW))
+    if access.can("scan"):
+        buttons.append(
+            KeyboardButton(
+                text=BTN_SCAN,
+                web_app=WebAppInfo(url=scanner_url) if scanner_url else None,
+            )
+        )
+    buttons += [KeyboardButton(text=BTN_LIST), KeyboardButton(text=BTN_SEARCH)]
+    for perm, text in (
+        ("stats", BTN_STATS), ("admins", BTN_ADMINS),
+        ("design", BTN_DESIGN), ("reset", BTN_RESET),
+    ):
+        if access.can(perm):
+            buttons.append(KeyboardButton(text=text))
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
 def inline(*rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
@@ -87,6 +69,13 @@ def inline(*rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
             for row in rows
         ]
     )
+
+
+CANCEL = ("❌ Отмена", "cancel")
+
+
+def cancel_kb() -> InlineKeyboardMarkup:
+    return inline([CANCEL])
 
 
 def ticket_code(config: Config, ticket_id: int) -> str:
@@ -126,15 +115,18 @@ def ticket_card(t: Ticket, config: Config) -> str:
     return text
 
 
-def ticket_actions(
-    ticket_id: int, is_main: bool, scanned: bool, can_delete: bool
-) -> InlineKeyboardMarkup:
-    rows = [[("🔁 Прислать билет ещё раз", f"t:send:{ticket_id}")]]
-    if is_main and scanned:
-        rows.append([("↩️ Снять отметку о проходе", f"t:unscan:{ticket_id}")])
-    if can_delete:
-        rows.append([("🗑 Удалить билет", f"t:del:{ticket_id}")])
+def ticket_actions(t: Ticket, access: Access) -> InlineKeyboardMarkup:
+    rows = [[("🔁 Прислать билет ещё раз", f"t:send:{t['id']}")]]
+    if access.is_main and t["scan_count"]:
+        rows.append([("↩️ Снять отметку о проходе", f"t:unscan:{t['id']}")])
+    if can_delete(t, access):
+        rows.append([("🗑 Удалить билет", f"t:del:{t['id']}")])
     return inline(*rows)
+
+
+def can_delete(t: Ticket, access: Access) -> bool:
+    """Удалить билет может главный админ или тот админ, который его выдал."""
+    return access.is_main or t["created_by"] == access.user_id
 
 
 def list_line(t: Ticket, config: Config) -> str:

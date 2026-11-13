@@ -25,8 +25,11 @@ CREATE TABLE IF NOT EXISTS tickets (
     last_scan_at       TEXT
 );
 CREATE TABLE IF NOT EXISTS admins (
-    user_id  INTEGER PRIMARY KEY,
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id  INTEGER UNIQUE,          -- NULL, пока добавленный по нику не написал боту
+    username TEXT,                    -- без @, в нижнем регистре
     name     TEXT NOT NULL,
+    perms    TEXT NOT NULL,           -- разрешённые разделы через запятую
     added_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (
@@ -47,11 +50,26 @@ class Database:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self._migrate_admins()
         self.conn.executescript(SCHEMA)
         self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
+
+    def _migrate_admins(self) -> None:
+        """Перенос админов из первой версии таблицы (без ников и разрешений)."""
+        cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(admins)")]
+        if not cols or "perms" in cols:
+            return
+        with self.conn:
+            self.conn.execute("ALTER TABLE admins RENAME TO admins_old")
+            self.conn.executescript(SCHEMA)
+            self.conn.execute(
+                "INSERT INTO admins (user_id, name, perms, added_at)"
+                " SELECT user_id, name, 'new,scan', added_at FROM admins_old"
+            )
+            self.conn.execute("DROP TABLE admins_old")
 
     # ---------- билеты ----------
 
@@ -89,10 +107,15 @@ class Database:
             "SELECT * FROM tickets WHERE phone = ? ORDER BY id", (phone,)
         ).fetchall()
 
-    def all_tickets(self) -> list[Ticket]:
-        return self.conn.execute("SELECT * FROM tickets ORDER BY id").fetchall()
+    def all_tickets(self, owner: int | None = None) -> list[Ticket]:
+        """Все билеты; с owner — только выданные этим администратором."""
+        if owner is None:
+            return self.conn.execute("SELECT * FROM tickets ORDER BY id").fetchall()
+        return self.conn.execute(
+            "SELECT * FROM tickets WHERE created_by = ? ORDER BY id", (owner,)
+        ).fetchall()
 
-    def search(self, query: str, limit: int = 10) -> list[Ticket]:
+    def search(self, query: str, owner: int | None = None, limit: int = 10) -> list[Ticket]:
         """Поиск по ФИ, телефону, группе, вузу и номеру билета.
 
         Фильтруем в Python: LIKE в SQLite не умеет регистронезависимую кириллицу.
@@ -100,7 +123,7 @@ class Database:
         q = query.casefold().strip()
         digits = "".join(ch for ch in q if ch.isdigit())
         found = []
-        for t in self.all_tickets():
+        for t in self.all_tickets(owner):
             hay = " ".join(
                 (t["full_name"], t["study_group"], t["university"], t["phone"])
             ).casefold()
@@ -151,28 +174,66 @@ class Database:
 
     # ---------- администраторы ----------
 
-    def is_admin(self, user_id: int) -> bool:
+    def find_admin(self, user_id: int, username: str | None) -> sqlite3.Row | None:
+        """Админ по Telegram ID, а если такого нет — по нику среди тех,
+        кого добавили по нику и кто ещё ни разу не писал боту."""
+        row = self.conn.execute(
+            "SELECT * FROM admins WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if row is None and username:
+            row = self.conn.execute(
+                "SELECT * FROM admins WHERE user_id IS NULL AND username = ?",
+                (username.lower(),),
+            ).fetchone()
+        return row
+
+    def get_admin(self, admin_id: int) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM admins WHERE id = ?", (admin_id,)
+        ).fetchone()
+
+    def admin_exists(self, user_id: int | None, username: str | None) -> bool:
         return (
             self.conn.execute(
-                "SELECT 1 FROM admins WHERE user_id = ?", (user_id,)
+                "SELECT 1 FROM admins WHERE (?1 IS NOT NULL AND user_id = ?1)"
+                " OR (?2 IS NOT NULL AND username = ?2)",
+                (user_id, username),
             ).fetchone()
             is not None
         )
 
-    def add_admin(self, user_id: int, name: str) -> None:
+    def add_admin(
+        self, user_id: int | None, username: str | None, name: str, perms: str
+    ) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO admins (user_id, username, name, perms, added_at)"
+                " VALUES (?,?,?,?,?)",
+                (user_id, username, name, perms, now_iso()),
+            )
+        return cur.lastrowid
+
+    def update_admin_profile(
+        self, admin_id: int, user_id: int, username: str | None, name: str
+    ) -> None:
         with self.conn:
             self.conn.execute(
-                "INSERT INTO admins (user_id, name, added_at) VALUES (?,?,?)"
-                " ON CONFLICT(user_id) DO UPDATE SET name = excluded.name",
-                (user_id, name, now_iso()),
+                "UPDATE admins SET user_id = ?, username = ?, name = ? WHERE id = ?",
+                (user_id, username, name, admin_id),
             )
 
-    def remove_admin(self, user_id: int) -> None:
+    def set_admin_perms(self, admin_id: int, perms: str) -> None:
         with self.conn:
-            self.conn.execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+            self.conn.execute(
+                "UPDATE admins SET perms = ? WHERE id = ?", (perms, admin_id)
+            )
+
+    def remove_admin(self, admin_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM admins WHERE id = ?", (admin_id,))
 
     def list_admins(self) -> list[sqlite3.Row]:
-        return self.conn.execute("SELECT * FROM admins ORDER BY added_at").fetchall()
+        return self.conn.execute("SELECT * FROM admins ORDER BY id").fetchall()
 
     # ---------- настройки ----------
 

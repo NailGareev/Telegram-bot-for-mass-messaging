@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
@@ -12,16 +12,20 @@ from aiogram.types import BotCommand
 from .config import Config, load_config
 from .db import Database
 from . import ui
-from .handlers import fallback, owner, tickets
+from .handlers import fallback, manage, tickets
+from .service import AccessMiddleware
 
 
 def build_dispatcher(db: Database, config: Config, bot_username: str) -> Dispatcher:
     ui.scanner_url = config.scanner_url
     dp = Dispatcher(db=db, config=config, bot_username=bot_username)
-    # Бот работает только в личных сообщениях
-    dp.message.filter(F.chat.type == "private")
-    # Порядок важен: сначала главный админ, затем общие функции, затем «всё остальное»
-    dp.include_routers(owner.router, tickets.router, fallback.router)
+    # Доступ только у администраторов и только в личных сообщениях:
+    # всем остальным бот ничего не отвечает.
+    access = AccessMiddleware()
+    dp.message.outer_middleware(access)
+    dp.callback_query.outer_middleware(access)
+    # Порядок важен: разделы управления, затем билеты, затем «всё остальное»
+    dp.include_routers(manage.router, tickets.router, fallback.router)
     return dp
 
 
@@ -37,7 +41,6 @@ async def run() -> None:
         [
             BotCommand(command="start", description="Главное меню"),
             BotCommand(command="cancel", description="Отменить текущее действие"),
-            BotCommand(command="id", description="Мой Telegram ID"),
         ]
     )
     dp = build_dispatcher(db, config, me.username)
