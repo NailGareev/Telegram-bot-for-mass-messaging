@@ -21,7 +21,8 @@ from .access import PERMS, Access, parse_perms, resolve_access
 from .config import DEFAULT_BOX, DEFAULT_TEMPLATE, Config
 from .db import Database, Ticket
 from .imaging import Box, find_qr_boxes, qr_payload, render_ticket
-from .ui import client_block, export_txt, fmt_dt, main_menu, ticket_code
+from .events import Hub
+from .ui import can_delete, client_block, export_txt, fmt_dt, main_menu, ticket_code
 
 
 log = logging.getLogger(__name__)
@@ -205,13 +206,17 @@ def current_template(db: Database, config: Config) -> tuple[Path, Box]:
     return DEFAULT_TEMPLATE, DEFAULT_BOX
 
 
+async def ticket_png(t: Ticket, db: Database, config: Config, bot_username: str) -> bytes:
+    template, box = current_template(db, config)
+    return await asyncio.to_thread(
+        render_ticket, template, box, qr_payload(bot_username, t["token"])
+    )
+
+
 async def ticket_file(
     t: Ticket, db: Database, config: Config, bot_username: str
 ) -> BufferedInputFile:
-    template, box = current_template(db, config)
-    png = await asyncio.to_thread(
-        render_ticket, template, box, qr_payload(bot_username, t["token"])
-    )
+    png = await ticket_png(t, db, config, bot_username)
     return BufferedInputFile(png, filename=f"ticket_{ticket_code(config, t['id'])}.png")
 
 
@@ -237,18 +242,67 @@ def image_file_id(message: Message) -> str | None:
     return None
 
 
-def do_scan(t: Ticket, db: Database, config: Config, by_name: str) -> str:
-    """Отмечает сканирование билета и возвращает текст результата."""
-    t, first = db.register_scan(t["id"], by_name)
-    if first:
+def ticket_dict(t: Ticket, access: Access, config: Config) -> dict:
+    """Билет в виде, в котором его получает Mini App."""
+    return {
+        "id": t["id"],
+        "code": ticket_code(config, t["id"]),
+        "full_name": t["full_name"],
+        "group": t["study_group"],
+        "university": t["university"],
+        "phone": t["phone"],
+        "created_at": fmt_dt(t["created_at"], config),
+        "created_by": t["created_by_name"],
+        "scan_count": t["scan_count"],
+        "first_scan_at": fmt_dt(t["first_scan_at"], config) if t["scan_count"] else None,
+        "first_scan_by": t["first_scan_by_name"],
+        "can_delete": can_delete(t, access),
+        "can_unscan": access.is_main and bool(t["scan_count"]),
+    }
+
+
+def scan_text(status: str, t: Ticket | None, config: Config) -> str:
+    """Текст результата сканирования для чата."""
+    if status == "ok":
         return (
             "✅ <b>БИЛЕТ ДЕЙСТВИТЕЛЕН</b> — первое сканирование\n\n"
             + client_block(t, config)
             + f"\n\n🕒 Отмечен: {fmt_dt(t['first_scan_at'], config)}"
         )
-    return (
-        f"⚠️ <b>ПОВТОРНОЕ СКАНИРОВАНИЕ</b> — билет сканируется уже {t['scan_count']}-й раз!\n"
-        f"Первое сканирование: <b>{fmt_dt(t['first_scan_at'], config)}</b>"
-        f" (админ: {escape(t['first_scan_by_name'] or '—')})\n\n"
-        + client_block(t, config)
-    )
+    if status == "repeat":
+        return (
+            f"⚠️ <b>ПОВТОРНОЕ СКАНИРОВАНИЕ</b> — билет сканируется уже {t['scan_count']}-й раз!\n"
+            f"Первое сканирование: <b>{fmt_dt(t['first_scan_at'], config)}</b>"
+            f" (админ: {escape(t['first_scan_by_name'] or '—')})\n\n"
+            + client_block(t, config)
+        )
+    if status == "not_found":
+        return (
+            "❌ <b>БИЛЕТ НЕ НАЙДЕН</b>\nТакого билета нет в базе (возможно, он удалён "
+            "или список был сброшен)."
+        )
+    if status == "unreadable":
+        return "Не удалось прочитать QR на фото. Попробуйте снять ближе и ровнее."
+    return "❌ Это QR-код не от нашего билета."
+
+
+async def report_scan(
+    screen: Screen, hub: Hub, access: Access, db: Database, config: Config,
+    status: str, t: Ticket | None = None, by_name: str = "",
+) -> None:
+    """Результат сканирования из чата. Если у админа открыт Mini App, уведомление
+    показывается в нём, иначе (или если приложение не подтвердило) — в чате."""
+    if t is not None:  # проверка билета: отмечаем проход
+        t, first = db.register_scan(t["id"], by_name)
+        status = "ok" if first else "repeat"
+    text = scan_text(status, t, config)
+    event = {
+        "type": "scan", "status": status,
+        "ticket": ticket_dict(t, access, config) if t is not None else None,
+    }
+
+    async def fallback() -> None:
+        await screen.send(text)
+
+    if not hub.publish(screen.chat_id, event, fallback):
+        await screen.send(text)

@@ -42,6 +42,66 @@ def _encode(path: Path) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+async def _post(payload: dict, api_key: str, timeout: int = 60) -> dict:
+    """Запрос к Groq. 429 (лимит запросов) повторяется один раз после паузы."""
+    for attempt in (1, 2):
+        try:
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout), trust_env=True
+            ) as session:
+                async with session.post(
+                    GROQ_URL, json=payload, headers={"Authorization": f"Bearer {api_key}"}
+                ) as resp:
+                    body = await resp.json(content_type=None)
+                    if resp.status == 429 and attempt == 1:
+                        await asyncio.sleep(min(float(resp.headers.get("retry-after", 8)), 20))
+                        continue
+                    if resp.status != 200:
+                        msg = (body.get("error") or {}).get("message") if isinstance(body, dict) else None
+                        raise AIError(f"Groq ответил {resp.status}: {msg or body}")
+                    return body
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            raise AIError(f"не удалось обратиться к Groq ({e.__class__.__name__})") from e
+    raise AIError("Groq: превышен лимит запросов")
+
+
+EXTRACT_PROMPT = """You extract event-ticket buyers from a pasted list (Russian or Kazakh \
+text, maybe a table, numbered lines, headers, notes).
+Return JSON only: {"records": [{"full_name": "", "group": "", "university": "", \
+"phone": "", "count": 1}]}
+Rules:
+- One record per person. Keep the name as written (e.g. "Иванов Иван").
+- group is the study group (e.g. "ИС-21"); university is the university name or abbreviation.
+- phone exactly as written, digits and "+" only if you can; no invented numbers.
+- count is the number of tickets if the text says so ("2 билета", "x3"), otherwise 1.
+- Use "" for anything not in the text. Never invent data. Skip headers, totals, comments.
+- If a field applies to a whole section (a university heading above the people), copy it \
+to each person in that section.
+
+TEXT:
+"""
+
+
+async def extract_records(text: str, api_key: str, model: str) -> list[dict]:
+    """Список клиентов из куска текста."""
+    payload = {
+        "model": model,
+        "temperature": 0,
+        "max_completion_tokens": 4096,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "user", "content": EXTRACT_PROMPT + text}],
+    }
+    body = await _post(payload, api_key, timeout=90)
+    try:
+        answer = json.loads(body["choices"][0]["message"]["content"])
+        records = answer["records"]
+        if not isinstance(records, list):
+            raise TypeError
+        return [r for r in records if isinstance(r, dict)]
+    except (KeyError, IndexError, TypeError, ValueError) as e:
+        raise AIError("ИИ вернул непонятный ответ") from e
+
+
 async def locate_qr(
     path: Path,
     api_key: str,
@@ -84,19 +144,7 @@ async def locate_qr(
             }
         ],
     }
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=60), trust_env=True
-        ) as session:
-            async with session.post(
-                GROQ_URL, json=payload, headers={"Authorization": f"Bearer {api_key}"}
-            ) as resp:
-                body = await resp.json(content_type=None)
-                if resp.status != 200:
-                    msg = (body.get("error") or {}).get("message") if isinstance(body, dict) else None
-                    raise AIError(f"Groq ответил {resp.status}: {msg or body}")
-    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
-        raise AIError(f"не удалось обратиться к Groq ({e.__class__.__name__})") from e
+    body = await _post(payload, api_key)
 
     try:
         answer = json.loads(body["choices"][0]["message"]["content"])

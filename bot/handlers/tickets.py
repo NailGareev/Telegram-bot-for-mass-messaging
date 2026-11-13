@@ -18,9 +18,10 @@ from .. import ui
 from ..access import Access, Perm
 from ..config import Config
 from ..db import Database
+from ..events import Hub
 from ..imaging import decode_qr, extract_token
 from ..service import (
-    Screen, do_scan, download, export_file, image_file_id, sync_menu_button, ticket_file,
+    Screen, download, export_file, image_file_id, report_scan, sync_menu_button, ticket_file,
 )
 from ..ui import (
     BTN_LIST, BTN_NEW, BTN_SCAN, BTN_SEARCH, BTN_STATS, CANCEL, PLAIN_TEXT,
@@ -67,12 +68,12 @@ def welcome(access: Access) -> str:
 @router.message(CommandStart(deep_link=True))
 async def start_with_qr(
     message: Message, command: CommandObject, state: FSMContext,
-    db: Database, config: Config, access: Access, screen: Screen,
+    db: Database, config: Config, access: Access, screen: Screen, hub: Hub,
 ):
     """Админ отсканировал QR камерой телефона — ссылка открыла бота."""
     token = extract_token(command.args or "")
     if token and access.can("scan"):
-        return await scan_token(message, screen, token, db, config)
+        return await scan_token(message, screen, token, db, config, hub, access)
     await start(message, state, access, screen)
 
 
@@ -290,27 +291,33 @@ async def create_cancel(cb: CallbackQuery, state: FSMContext):
 # Итог каждого сканирования остаётся в чате — это журнал входа.
 
 
-async def scan_token(message: Message, screen: Screen, token: str, db: Database, config: Config):
+async def scan_token(
+    message: Message, screen: Screen, token: str, db: Database, config: Config,
+    hub: Hub, access: Access,
+):
     t = db.get_ticket_by_token(token)
-    if not t:
-        return await screen.send(
-            "❌ <b>БИЛЕТ НЕ НАЙДЕН</b>\nТакого билета нет в базе (возможно, он удалён "
-            "или список был сброшен)."
-        )
-    await screen.send(do_scan(t, db, config, message.from_user.full_name))
+    await report_scan(
+        screen, hub, access, db, config, "ok" if t else "not_found", t,
+        message.from_user.full_name,
+    )
 
 
-async def scan_number(message: Message, screen: Screen, raw: str, db: Database, config: Config):
+async def scan_number(
+    message: Message, screen: Screen, raw: str, db: Database, config: Config,
+    hub: Hub, access: Access,
+):
     m = re.fullmatch(r"\D*(\d{1,9})", raw.strip())
     t = db.get_ticket(int(m.group(1))) if m else None
-    if not t:
-        return await screen.send("❌ Билет с таким номером не найден.")
-    await screen.send(do_scan(t, db, config, message.from_user.full_name))
+    await report_scan(
+        screen, hub, access, db, config, "ok" if t else "not_found", t,
+        message.from_user.full_name,
+    )
 
 
 @router.message(F.web_app_data, Perm("scan"))
 async def scan_from_camera(
-    message: Message, state: FSMContext, db: Database, config: Config, screen: Screen
+    message: Message, state: FSMContext, db: Database, config: Config, screen: Screen,
+    hub: Hub, access: Access,
 ):
     """Результат из мини-приложения со сканером: текст QR или «#номер билета»."""
     await state.clear()
@@ -318,10 +325,10 @@ async def scan_from_camera(
     data = message.web_app_data.data
     token = extract_token(data)
     if token:
-        return await scan_token(message, screen, token, db, config)
+        return await scan_token(message, screen, token, db, config, hub, access)
     if not re.fullmatch(r"#\d{1,9}", data.strip()):
-        return await screen.send("❌ Это QR-код не от нашего билета.")
-    await scan_number(message, screen, data, db, config)
+        return await report_scan(screen, hub, access, db, config, "foreign")
+    await scan_number(message, screen, data, db, config, hub, access)
 
 
 @router.message(F.text == BTN_SCAN, Perm("scan"))
@@ -341,27 +348,30 @@ async def scan_start(message: Message, state: FSMContext, screen: Screen):
 
 
 @router.message(Scan.waiting, PLAIN_TEXT, Perm("scan"))
-async def scan_by_number(message: Message, db: Database, config: Config, screen: Screen):
+async def scan_by_number(
+    message: Message, db: Database, config: Config, screen: Screen, hub: Hub, access: Access
+):
     token = extract_token(message.text)
     if token:
-        return await scan_token(message, screen, token, db, config)
-    await scan_number(message, screen, message.text, db, config)
+        return await scan_token(message, screen, token, db, config, hub, access)
+    await scan_number(message, screen, message.text, db, config, hub, access)
 
 
 @router.message(StateFilter(None, Scan.waiting), F.photo | F.document, Perm("scan"))
-async def scan_photo(message: Message, bot: Bot, db: Database, config: Config, screen: Screen):
+async def scan_photo(
+    message: Message, bot: Bot, db: Database, config: Config, screen: Screen,
+    hub: Hub, access: Access,
+):
     file_id = image_file_id(message)
     if not file_id:
         return
     text = await asyncio.to_thread(decode_qr, await download(bot, file_id))
     if not text:
-        return await screen.send(
-            "Не удалось прочитать QR на фото. Попробуйте снять ближе и ровнее."
-        )
+        return await report_scan(screen, hub, access, db, config, "unreadable")
     token = extract_token(text)
     if not token:
-        return await screen.send("❌ Это QR-код не от нашего билета.")
-    await scan_token(message, screen, token, db, config)
+        return await report_scan(screen, hub, access, db, config, "foreign")
+    await scan_token(message, screen, token, db, config, hub, access)
 
 
 # ---------- список, статистика ----------

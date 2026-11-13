@@ -31,6 +31,7 @@ class Config:
     webapp_port: int = 8080
     tunnel: bool = True
     log_level: str = "WARNING"
+    groq_text_model: str = "llama-3.3-70b-versatile"
 
     @property
     def db_path(self) -> Path:
@@ -96,6 +97,7 @@ def load_config() -> Config:
         groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
         groq_model=os.getenv("GROQ_MODEL", "").strip()
         or "meta-llama/llama-4-scout-17b-16e-instruct",
+        groq_text_model=os.getenv("GROQ_TEXT_MODEL", "").strip() or "llama-3.3-70b-versatile",
         tz=ZoneInfo(os.getenv("TIMEZONE", "").strip() or "Asia/Almaty"),
         data_dir=data_dir,
         ticket_prefix=os.getenv("TICKET_PREFIX", "").strip() or "MV",

@@ -15,6 +15,7 @@ from .db import Database
 from . import ui
 from .handlers import fallback, manage, tickets
 from .service import AccessMiddleware, scanner_url, sync_menu_button
+from .events import Hub
 from .tunnel import Tunnel
 from .webapi import PAGE, WebApi
 
@@ -32,12 +33,14 @@ class MiniApp:
         self.runner: web.AppRunner | None = None
         self.tunnel = Tunnel()
 
-    async def start(self, bot: Bot, db: Database, config: Config, bot_username: str) -> str:
+    async def start(
+        self, bot: Bot, db: Database, config: Config, bot_username: str, hub: Hub | None = None,
+    ) -> str:
         """Возвращает публичный адрес приложения или пустую строку, если оно выключено."""
         if not config.miniapp:
             return ""
         self.runner = web.AppRunner(
-            WebApi(bot, db, config, bot_username).build(),
+            WebApi(bot, db, config, bot_username, hub).build(),
             access_log=logging.getLogger("aiohttp.access") if verbose(config) else None,
         )
         await self.runner.setup()
@@ -72,9 +75,11 @@ async def refresh_menu_buttons(bot: Bot, db: Database, config: Config) -> None:
         await sync_menu_button(bot, user_id)
 
 
-def build_dispatcher(db: Database, config: Config, bot_username: str) -> Dispatcher:
+def build_dispatcher(
+    db: Database, config: Config, bot_username: str, hub: Hub | None = None
+) -> Dispatcher:
     ui.scanner_url = ui.versioned(scanner_url(db, config))
-    dp = Dispatcher(db=db, config=config, bot_username=bot_username)
+    dp = Dispatcher(db=db, config=config, bot_username=bot_username, hub=hub or Hub())
     # Доступ только у администраторов и только в личных сообщениях:
     # всем остальным бот ничего не отвечает.
     access = AccessMiddleware()
@@ -101,10 +106,11 @@ async def run() -> None:
             BotCommand(command="cancel", description="Отменить текущее действие"),
         ]
     )
-    dp = build_dispatcher(db, config, me.username)
+    hub = Hub()
+    dp = build_dispatcher(db, config, me.username, hub)
     miniapp = MiniApp()
     try:
-        ui.miniapp_url = await miniapp.start(bot, db, config, me.username)
+        ui.miniapp_url = await miniapp.start(bot, db, config, me.username, hub)
         await refresh_menu_buttons(bot, db, config)
         log.info("Бот @%s запущен", me.username)
         await dp.start_polling(bot)

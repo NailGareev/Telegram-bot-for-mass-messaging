@@ -9,13 +9,15 @@ import asyncio
 import io
 import logging
 import re
+import secrets
 import shutil
 import time
+import zipfile
 from collections import Counter
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import User
+from aiogram.types import BufferedInputFile, User
 from aiogram.utils.web_app import safe_parse_webapp_init_data
 from aiohttp import web
 from PIL import Image, UnidentifiedImageError
@@ -25,12 +27,14 @@ from .config import BASE_DIR, Config
 from .db import Database
 from .handlers.manage import admin_label, mask, notify_admin
 from .handlers.tickets import MAX_TICKETS_AT_ONCE, clean, normalize_phone
-from .imaging import clamp_box, extract_token, image_size, save_template
+from . import ai, importer
+from .events import Hub
+from .imaging import clamp_box, decode_qr, extract_token, image_size, save_template
 from .service import (
     current_template, export_file, groq_key, locate_box, render_preview, scanner_url,
-    set_scanner_url, sync_menu_button, ticket_file,
+    set_scanner_url, sync_menu_button, ticket_dict, ticket_file, ticket_png,
 )
-from .ui import can_delete, client_block, fmt_dt, ticket_code
+from .ui import can_delete, client_block, export_txt, ticket_code
 
 log = logging.getLogger(__name__)
 
@@ -46,8 +50,14 @@ class ApiError(Exception):
 
 
 class WebApi:
-    def __init__(self, bot: Bot, db: Database, config: Config, bot_username: str):
+    def __init__(
+        self, bot: Bot, db: Database, config: Config, bot_username: str,
+        hub: Hub | None = None,
+    ):
         self.bot, self.db, self.config, self.bot_username = bot, db, config, bot_username
+        self.hub = hub or Hub()
+        self.jobs: dict[str, dict] = {}
+        self.background: set[asyncio.Task] = set()
 
     def build(self) -> web.Application:
         app = web.Application(middlewares=[self.middleware], client_max_size=25 * 1024 ** 2)
@@ -59,6 +69,12 @@ class WebApi:
             "tickets/action": self.tickets_action,
             "tickets/export": self.tickets_export,
             "scan": self.scan,
+            "scan/photo": self.scan_photo,
+            "events/poll": self.events_poll,
+            "tickets/image": self.ticket_image,
+            "import/start": self.import_start,
+            "import/status": self.import_status,
+            "import/create": self.import_create,
             "stats": self.stats,
             "admins/list": self.admins_list,
             "admins/add": self.admins_add,
@@ -136,21 +152,7 @@ class WebApi:
         return data
 
     def ticket_json(self, t, access: Access) -> dict:
-        return {
-            "id": t["id"],
-            "code": ticket_code(self.config, t["id"]),
-            "full_name": t["full_name"],
-            "group": t["study_group"],
-            "university": t["university"],
-            "phone": t["phone"],
-            "created_at": fmt_dt(t["created_at"], self.config),
-            "created_by": t["created_by_name"],
-            "scan_count": t["scan_count"],
-            "first_scan_at": fmt_dt(t["first_scan_at"], self.config) if t["scan_count"] else None,
-            "first_scan_by": t["first_scan_by_name"],
-            "can_delete": can_delete(t, access),
-            "can_unscan": access.is_main and bool(t["scan_count"]),
-        }
+        return ticket_dict(t, access, self.config)
 
     async def page(self, request: web.Request) -> web.Response:
         return web.FileResponse(PAGE, headers={"Cache-Control": "no-cache"})
@@ -305,6 +307,224 @@ class WebApi:
             "status": "ok" if first else "repeat",
             "ticket": self.ticket_json(t, access),
         })
+
+    async def scan_photo(self, request: web.Request) -> web.Response:
+        """Скан по фото QR-кода (если камера Telegram недоступна)."""
+        self.need(request, "scan")
+        raw = await request.read()
+        text = await asyncio.to_thread(decode_qr, raw) if raw else None
+        if not text:
+            return web.json_response({"status": "unreadable"})
+        token = extract_token(text)
+        if not token:
+            return web.json_response({"status": "foreign"})
+        t = self.db.get_ticket_by_token(token)
+        if not t:
+            return web.json_response({"status": "not_found"})
+        t, first = self.db.register_scan(t["id"], request["user"].full_name)
+        return web.json_response({
+            "status": "ok" if first else "repeat",
+            "ticket": self.ticket_json(t, request["access"]),
+        })
+
+    async def events_poll(self, request: web.Request) -> web.Response:
+        """Длинный опрос: приложение держит его открытым и получает уведомления
+        (например, результаты сканирования из чата)."""
+        data = await self.body(request)
+        after = data.get("after")
+        try:
+            after = None if after is None else int(after)
+            wait = max(1.0, min(float(data.get("wait", 20)), 25.0))
+        except (TypeError, ValueError):
+            raise ApiError("Некорректный запрос")
+        events, last = await self.hub.poll(request["user"].id, after, wait)
+        return web.json_response({"events": events, "last": last})
+
+    async def ticket_image(self, request: web.Request) -> web.Response:
+        data = await self.body(request)
+        t, _ = self.visible_ticket(request, data.get("id"))
+        png = await ticket_png(t, self.db, self.config, self.bot_username)
+        jpeg = await asyncio.to_thread(self.to_jpeg, png)
+        return web.Response(body=jpeg, content_type="image/jpeg")
+
+    # ---------- массовый залив ----------
+
+    def new_job(self, user_id: int) -> dict:
+        now = time.time()
+        for key in [k for k, j in self.jobs.items() if now - j["created"] > 3600]:
+            del self.jobs[key]
+        job = {
+            "id": secrets.token_urlsafe(8), "user": user_id, "created": now,
+            "state": "running", "done": 0, "total": 0, "error": "", "result": None,
+        }
+        self.jobs[job["id"]] = job
+        return job
+
+    def own_job(self, request: web.Request, job_id) -> dict:
+        job = self.jobs.get(str(job_id))
+        if not job or job["user"] != request["user"].id:
+            raise ApiError("Задача не найдена — загрузите файл заново", 404)
+        return job
+
+    async def import_start(self, request: web.Request) -> web.Response:
+        self.need(request, "new")
+        raw = await request.read()
+        try:
+            text = await asyncio.to_thread(importer.extract_text, raw)
+        except importer.ImportError_ as e:
+            raise ApiError(str(e))
+        parts = importer.chunks(text)
+        if not parts:
+            raise ApiError("В файле нет текста")
+        job = self.new_job(request["user"].id)
+        job["total"] = len(parts)
+        task = asyncio.get_running_loop().create_task(self.run_import(job, parts))
+        self.background.add(task)
+        task.add_done_callback(self.background.discard)
+        return web.json_response({"job": job["id"], "total": len(parts)})
+
+    async def run_import(self, job: dict, parts: list[str]) -> None:
+        key = groq_key(self.db, self.config)
+        raw_records, warnings, ai_parts, rule_parts = [], [], 0, 0
+        try:
+            for part in parts:
+                records = None
+                if key:
+                    try:
+                        records = await ai.extract_records(part, key, self.config.groq_text_model)
+                        ai_parts += 1
+                    except ai.AIError as e:
+                        log.warning("Groq (импорт): %s", e)
+                        msg = f"ИИ не справился с частью списка ({e}) — она разобрана по простым правилам"
+                        if msg not in warnings:
+                            warnings.append(msg)
+                if records is None:
+                    records = importer.rules_parse(part)
+                    rule_parts += 1
+                raw_records.extend(records)
+                job["done"] += 1
+            if not key:
+                warnings.append(
+                    "Ключ Groq не задан, поэтому список разобран по простым правилам: "
+                    "одна строка — один клиент в порядке «ФИ, группа, университет, телефон»."
+                )
+            mode = "ai" if not rule_parts else ("rules" if not ai_parts else "mixed")
+            result = importer.finalize(raw_records, MAX_TICKETS_AT_ONCE, mode, warnings)
+            job["result"] = {
+                "records": self.annotate(result.records),
+                "mode": result.mode,
+                "warnings": result.warnings,
+                "dropped_duplicates": result.dropped_duplicates,
+                "truncated": result.truncated,
+                "max_records": importer.MAX_RECORDS,
+            }
+            job["state"] = "done"
+        except Exception:
+            log.exception("Ошибка разбора файла")
+            job["state"], job["error"] = "failed", "Не удалось разобрать файл"
+
+    def annotate(self, records: list[dict]) -> list[dict]:
+        """Добавляет к записям проблемы и признак «такой клиент уже есть в базе»."""
+        out = []
+        for rec in records:
+            same = self.db.find_by_phone(rec["phone"]) if rec["phone"].startswith("+") else []
+            already = any(t["full_name"].casefold() == rec["full_name"].casefold() for t in same)
+            out.append({
+                **rec,
+                "issues": importer.issues_of(rec),
+                "already": already,
+                "phone_used": bool(same) and not already,
+            })
+        return out
+
+    async def import_status(self, request: web.Request) -> web.Response:
+        self.need(request, "new")
+        job = self.own_job(request, (await self.body(request)).get("job"))
+        data = {"state": job["state"], "done": job["done"], "total": job["total"], "error": job["error"]}
+        if job["state"] == "done":
+            data.update(job["result"])
+        return web.json_response(data)
+
+    async def import_create(self, request: web.Request) -> web.Response:
+        access = self.need(request, "new")
+        data = await self.body(request)
+        raw_records = data.get("records")
+        if not isinstance(raw_records, list) or not raw_records:
+            raise ApiError("Нет клиентов для выдачи билетов")
+        if len(raw_records) > importer.MAX_RECORDS:
+            raise ApiError(f"За один раз — не больше {importer.MAX_RECORDS} клиентов")
+        records = []
+        for n, raw in enumerate(raw_records, 1):
+            if not isinstance(raw, dict):
+                raise ApiError("Некорректный запрос")
+            rec = importer.normalize_record(raw, MAX_TICKETS_AT_ONCE)
+            problems = importer.issues_of(rec)
+            if problems:
+                raise ApiError(f"Строка {n} ({rec['full_name'] or 'без имени'}): {', '.join(problems)}")
+            records.append(rec)
+        if sum(r["count"] for r in records) > importer.MAX_TICKETS_TOTAL:
+            raise ApiError(f"За один раз — не больше {importer.MAX_TICKETS_TOTAL} билетов")
+
+        user: User = request["user"]
+        tickets = []
+        for rec in records:
+            for _ in range(rec["count"]):
+                tickets.append(self.db.create_ticket(
+                    rec["full_name"], rec["group"], rec["university"], rec["phone"],
+                    user.id, user.full_name,
+                ))
+        task = asyncio.get_running_loop().create_task(self.deliver_import(user.id, tickets))
+        self.background.add(task)  # ссылка, чтобы задачу не удалил сборщик мусора
+        task.add_done_callback(self.background.discard)
+        return web.json_response({
+            "created": len(tickets),
+            "clients": len(records),
+            "first": ticket_code(self.config, tickets[0]["id"]),
+            "last": ticket_code(self.config, tickets[-1]["id"]),
+            "tickets": [self.ticket_json(t, access) for t in tickets[:50]],
+        })
+
+    async def deliver_import(self, user_id: int, tickets: list) -> None:
+        """Рисует билеты и присылает админу в чат архивами (лимит Telegram — 50 МБ на файл)
+        вместе со списком. Выполняется в фоне, чтобы запрос не висел минутами."""
+        limit = 40 * 1024 * 1024
+        parts: list[bytes] = []
+        buf = io.BytesIO()
+        zf, size = zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED), 0
+        try:
+            for t in tickets:
+                png = await ticket_png(t, self.db, self.config, self.bot_username)
+                if size + len(png) > limit and size:
+                    zf.close()
+                    parts.append(buf.getvalue())
+                    buf = io.BytesIO()
+                    zf, size = zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED), 0
+                name = re.sub(r'[\\/:*?"<>|]+', "", t["full_name"]).strip()[:40]
+                zf.writestr(f"{ticket_code(self.config, t['id'])} {name}.png", png)
+                size += len(png)
+            zf.close()
+            parts.append(buf.getvalue())
+            total = len(parts)
+            for i, data in enumerate(parts, 1):
+                await self.bot.send_document(
+                    user_id, BufferedInputFile(data, filename=f"tickets_{i}_of_{total}.zip"),
+                    caption=f"Билеты ({len(tickets)} шт.): архив {i} из {total}",
+                )
+            await self.bot.send_document(
+                user_id,
+                BufferedInputFile(export_txt(tickets, self.config), filename="issued.txt"),
+                caption="Список выданных билетов",
+            )
+            self.hub.publish(user_id, {
+                "type": "notice", "text": f"Билеты ({len(tickets)} шт.) отправлены вам в чат с ботом",
+            })
+        except Exception:
+            log.exception("Не удалось отправить билеты массового залива")
+            self.hub.publish(user_id, {
+                "type": "notice", "error": True,
+                "text": "Билеты созданы, но отправить файлы в чат не удалось. "
+                        "Откройте их в списке и нажмите «Прислать в чат».",
+            })
 
     async def stats(self, request: web.Request) -> web.Response:
         self.need(request, "stats")
@@ -487,8 +707,12 @@ class WebApi:
         return web.Response(body=jpeg, content_type="image/jpeg")
 
     def preview_jpeg(self, path, box) -> bytes:
-        """Уменьшенный JPEG: предпросмотр грузится через туннель, PNG был бы тяжёлым."""
-        with Image.open(io.BytesIO(render_preview(path, box, self.bot_username))) as src:
+        return self.to_jpeg(render_preview(path, box, self.bot_username))
+
+    @staticmethod
+    def to_jpeg(png: bytes) -> bytes:
+        """Уменьшенный JPEG: картинки грузятся через туннель, PNG был бы тяжёлым."""
+        with Image.open(io.BytesIO(png)) as src:
             img = Image.new("RGB", src.size, "#2b1612")
             img.paste(src, mask=src.getchannel("A") if "A" in src.getbands() else None)
         img.thumbnail((1400, 1400), Image.LANCZOS)
