@@ -173,10 +173,12 @@ class WebApi:
         access = self.need(request, "new")
         data = await self.body(request)
         fields = {k: clean(str(data.get(k, ""))) for k in ("full_name", "group", "university")}
-        if not all(fields.values()):
-            raise ApiError("Заполните ФИ, группу и университет")
-        phone = normalize_phone(str(data.get("phone", "")))
-        if not phone:
+        if not fields["full_name"]:
+            raise ApiError("Введите фамилию и имя")
+        # Группа, университет и телефон необязательны; телефон, если указан, должен быть верным.
+        raw_phone = str(data.get("phone", "")).strip()
+        phone = normalize_phone(raw_phone) if raw_phone else ""
+        if raw_phone and not phone:
             raise ApiError("Не похоже на номер телефона")
         try:
             count = int(data.get("count", 1))
@@ -185,7 +187,7 @@ class WebApi:
         if not 1 <= count <= MAX_TICKETS_AT_ONCE:
             raise ApiError(f"Количество билетов — от 1 до {MAX_TICKETS_AT_ONCE}")
 
-        same = self.db.find_by_phone(phone)
+        same = self.db.find_by_phone(phone) if phone else []
         if same and not data.get("force"):
             # Приложение переспросит и повторит запрос с force
             return web.json_response({
@@ -534,7 +536,7 @@ class WebApi:
         def top(key: str) -> list:
             return [
                 {"name": name, "count": n}
-                for name, n in Counter(t[key] for t in tickets).most_common(10)
+                for name, n in Counter(t[key] for t in tickets if t[key]).most_common(10)
             ]
 
         return web.json_response({

@@ -3,7 +3,7 @@
 Основную работу делает ИИ (Groq): он понимает произвольное оформление списка —
 таблицы, нумерацию, лишние заголовки. Если ИИ недоступен, срабатывает простой
 разбор по правилам: одна строка — один клиент, поля через запятую, табуляцию,
-«;» или «|» в порядке «ФИ, группа, университет, телефон».
+«;» или «|» в порядке «ФИ, группа, университет, телефон». Обязательно только ФИ.
 """
 from __future__ import annotations
 
@@ -124,23 +124,34 @@ def chunks(text: str, size: int = CHUNK_CHARS) -> list[str]:
 # ---------- разбор по правилам (запасной вариант без ИИ) ----------
 
 
+NAME_WORD = re.compile(r"[A-ZА-ЯЁӘІҢҒҮҰҚӨҺ][a-zа-яёәіңғүұқөһ'’-]+")
+
+
+def looks_like_name(text: str) -> bool:
+    """«Иванов Иван» — 2–4 слова с заглавной буквы, без цифр. Нужно, чтобы строки только
+    с ФИ (без телефона) попадали в список, а заголовки вроде «Список участников» — нет."""
+    words = text.split()
+    return 2 <= len(words) <= 4 and all(NAME_WORD.fullmatch(w) for w in words)
+
+
 def rules_parse(text: str) -> list[dict]:
     records = []
     for line in text.split("\n"):
         line = re.sub(r"^\s*\d{1,3}[.)]\s+", "", line.strip())
         m = PHONE_RE.search(line)
-        if not m:
-            continue
-        rest = line[: m.start()] + " | " + line[m.end():]
+        phone = m.group(0) if m else ""
+        rest = line[: m.start()] + " | " + line[m.end():] if m else line
         parts = [p.strip(" ,;:|–—-\t") for p in re.split(r"[\t|;,]+|\s[–—-]\s", rest)]
         parts = [p for p in parts if p]
         if not parts:
             continue
+        if not phone and len(parts) < 2 and not looks_like_name(parts[0]):
+            continue   # без телефона берём строку, только если в ней есть поля или это похоже на ФИ
         records.append({
             "full_name": parts[0],
             "group": parts[1] if len(parts) > 1 else "",
             "university": " ".join(parts[2:]),
-            "phone": m.group(0),
+            "phone": phone,
             "count": 1,
         })
     return records
@@ -180,14 +191,12 @@ def normalize_record(raw: dict, max_count: int) -> dict:
 
 
 def issues_of(record: dict) -> list[str]:
+    """Обязательно только ФИ. Группа, университет и телефон могут быть пустыми,
+    но телефон, если он указан, должен быть верным."""
     problems = []
     if not record["full_name"]:
         problems.append("нет ФИ")
-    if not record["group"]:
-        problems.append("нет группы")
-    if not record["university"]:
-        problems.append("нет университета")
-    if not re.fullmatch(r"\+\d{7,15}", record["phone"]):
+    if record["phone"] and not re.fullmatch(r"\+\d{7,15}", record["phone"]):
         problems.append("неверный телефон")
     return problems
 
@@ -208,7 +217,7 @@ def finalize(raw_records: list[dict], max_count: int, mode: str, warnings: list[
         if not isinstance(raw, dict):
             continue
         rec = normalize_record(raw, max_count)
-        if not any((rec["full_name"], rec["group"], rec["university"])):
+        if not rec["full_name"]:
             continue
         key = (rec["full_name"].casefold(), rec["group"].casefold(),
                rec["university"].casefold(), rec["phone"])

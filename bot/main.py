@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -10,10 +11,11 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 from aiohttp import web
 
-from .config import Config, load_config
+from .config import BASE_DIR, Config, load_config
 from .db import Database
 from . import ui
-from .handlers import fallback, manage, tickets
+from .handlers import fallback, manage, tickets, update
+from . import updater
 from .service import AccessMiddleware, scanner_url, sync_menu_button
 from .events import Hub
 from .tunnel import Tunnel
@@ -76,27 +78,35 @@ async def refresh_menu_buttons(bot: Bot, db: Database, config: Config) -> None:
 
 
 def build_dispatcher(
-    db: Database, config: Config, bot_username: str, hub: Hub | None = None
+    db: Database, config: Config, bot_username: str, hub: Hub | None = None,
+    restarter: updater.Restarter | None = None,
 ) -> Dispatcher:
     ui.scanner_url = ui.versioned(scanner_url(db, config))
-    dp = Dispatcher(db=db, config=config, bot_username=bot_username, hub=hub or Hub())
+    dp = Dispatcher(
+        db=db, config=config, bot_username=bot_username, hub=hub or Hub(),
+        restarter=restarter or updater.Restarter(),
+    )
     # Доступ только у администраторов и только в личных сообщениях:
     # всем остальным бот ничего не отвечает.
     access = AccessMiddleware()
     dp.message.outer_middleware(access)
     dp.callback_query.outer_middleware(access)
-    # Порядок важен: разделы управления, затем билеты, затем «всё остальное»
-    dp.include_routers(manage.router, tickets.router, fallback.router)
+    # Порядок важен: обновление проекта, разделы управления, билеты, затем «всё остальное»
+    dp.include_routers(update.router, manage.router, tickets.router, fallback.router)
     return dp
 
 
-async def run() -> None:
+async def run() -> bool:
+    """Работает, пока бот не остановят. True — нужен перезапуск (после обновления)."""
     config = load_config()
     # По умолчанию в консоль попадают только предупреждения и ошибки.
     # Подробный журнал (каждое сообщение, запросы Mini App) — LOG_LEVEL=INFO в .env.
     logging.basicConfig(
         level=config.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    # Если обновлённая версия не смогла запуститься несколько раз подряд, возвращаем прежнюю.
+    if updater.startup_check(BASE_DIR, config.data_dir):
+        return True
     db = Database(config.db_path)
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     me = await bot.get_me()
@@ -106,14 +116,22 @@ async def run() -> None:
             BotCommand(command="cancel", description="Отменить текущее действие"),
         ]
     )
-    hub = Hub()
-    dp = build_dispatcher(db, config, me.username, hub)
+    hub, restarter = Hub(), updater.Restarter()
+    dp = build_dispatcher(db, config, me.username, hub, restarter)
     miniapp = MiniApp()
     try:
         ui.miniapp_url = await miniapp.start(bot, db, config, me.username, hub)
         await refresh_menu_buttons(bot, db, config)
+        await updater.confirm_started(bot, config.data_dir)
         log.info("Бот @%s запущен", me.username)
-        await dp.start_polling(bot)
+        polling = asyncio.create_task(dp.start_polling(bot))
+        waiter = asyncio.create_task(restarter.event.wait())
+        await asyncio.wait({polling, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        if restarter.requested:
+            await dp.stop_polling()
+        waiter.cancel()
+        await polling      # заодно пробросит ошибку, если опрос Telegram упал
+        return restarter.requested
     finally:
         await miniapp.stop()
         db.close()
@@ -122,9 +140,12 @@ async def run() -> None:
 
 def main() -> None:
     try:
-        asyncio.run(run())
+        restart = asyncio.run(run())
     except KeyboardInterrupt:
-        pass
+        return
+    if restart:
+        # Служба systemd или run.py запускают бота заново, уже на новой версии.
+        sys.exit(updater.RESTART_CODE)
 
 
 if __name__ == "__main__":

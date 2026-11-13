@@ -104,13 +104,18 @@ def fmt_dt(iso: str | None, config: Config) -> str:
     return datetime.fromisoformat(iso).astimezone(config.tz).strftime("%d.%m.%Y %H:%M")
 
 
+def dash(value: str | None) -> str:
+    """Необязательные поля (группа, университет, телефон) могут быть пустыми."""
+    return escape(value) if value else "—"
+
+
 def client_block(t: Ticket, config: Config) -> str:
     return (
         f"🎟 Билет <b>{ticket_code(config, t['id'])}</b>\n"
         f"👤 ФИ: <b>{escape(t['full_name'])}</b>\n"
-        f"👥 Группа: {escape(t['study_group'])}\n"
-        f"🎓 Универ: {escape(t['university'])}\n"
-        f"📞 Телефон: {escape(t['phone'])}"
+        f"👥 Группа: {dash(t['study_group'])}\n"
+        f"🎓 Универ: {dash(t['university'])}\n"
+        f"📞 Телефон: {dash(t['phone'])}"
     )
 
 
@@ -147,9 +152,12 @@ def can_delete(t: Ticket, access: Access) -> bool:
 
 def list_line(t: Ticket, config: Config) -> str:
     mark = "✅" if t["scan_count"] else "▫️"
+    extra = " · ".join(
+        escape(v) for v in (t["study_group"], t["university"], t["phone"]) if v
+    )
     return (
-        f"{mark} <b>{ticket_code(config, t['id'])}</b> {escape(t['full_name'])} · "
-        f"{escape(t['study_group'])} · {escape(t['university'])} · {escape(t['phone'])}"
+        f"{mark} <b>{ticket_code(config, t['id'])}</b> {escape(t['full_name'])}"
+        + (f" · {extra}" if extra else "")
     )
 
 
@@ -171,9 +179,9 @@ def export_txt(tickets: list[Ticket], config: Config) -> bytes:
             status = "не сканировался"
         lines += [
             f"{n}. {ticket_code(config, t['id'])} — {t['full_name']}",
-            f"   Группа: {t['study_group']}",
-            f"   Универ: {t['university']}",
-            f"   Телефон: {t['phone']}",
+            f"   Группа: {t['study_group'] or '—'}",
+            f"   Универ: {t['university'] or '—'}",
+            f"   Телефон: {t['phone'] or '—'}",
             f"   Выдан: {fmt_dt(t['created_at'], config)}, админ: {t['created_by_name']}",
             f"   Статус: {status}",
             "",

@@ -25,7 +25,7 @@ from ..service import (
 )
 from ..ui import (
     BTN_LIST, BTN_NEW, BTN_SCAN, BTN_SEARCH, BTN_STATS, CANCEL, PLAIN_TEXT,
-    can_delete, cancel_kb, client_block, inline, list_line, ticket_actions,
+    can_delete, cancel_kb, client_block, dash, inline, list_line, ticket_actions,
     ticket_card, ticket_code,
 )
 
@@ -112,6 +112,14 @@ def clean(text: str) -> str:
     return " ".join(text.split())[:MAX_FIELD]
 
 
+# Вместо кнопки «Пропустить» можно прислать прочерк.
+SKIP_WORDS = {"-", "—", "–", "нет", "Нет"}
+
+
+def skip_clean(text: str) -> str:
+    return "" if text.strip() in SKIP_WORDS else clean(text)
+
+
 def normalize_phone(text: str) -> str | None:
     digits = re.sub(r"\D", "", text)
     if not 7 <= len(digits) <= 15:
@@ -123,14 +131,16 @@ def normalize_phone(text: str) -> str | None:
     return "+" + digits
 
 
-async def ask(screen: Screen, data: dict, question: str):
+async def ask(screen: Screen, data: dict, question: str, optional: bool = False):
     """Очередной вопрос анкеты; сверху — то, что уже введено."""
     filled = "".join(
-        f"{label}: {escape(data[key])}\n" for key, label in STEPS if key in data
+        f"{label}: {escape(data[key]) if data[key] else '—'}\n"
+        for key, label in STEPS if key in data
     )
+    rows = [[("⏭ Пропустить", "new:skip")]] if optional else []
     await screen.show(
         "🎟 <b>Новый билет</b>\n\n" + filled + ("\n" if filled else "") + question,
-        cancel_kb(),
+        inline(*rows, [CANCEL]),
     )
 
 
@@ -149,38 +159,71 @@ async def begin_create(state: FSMContext, screen: Screen):
 async def create_name(message: Message, state: FSMContext, screen: Screen):
     data = await state.update_data(full_name=clean(message.text))
     await state.set_state(Create.group)
-    await ask(screen, data, "Введите <b>группу</b>:")
+    await ask(screen, data, "Введите <b>группу</b>:", optional=True)
 
 
 @router.message(Create.group, PLAIN_TEXT)
 async def create_group(message: Message, state: FSMContext, screen: Screen):
-    data = await state.update_data(group=clean(message.text))
+    data = await state.update_data(group=skip_clean(message.text))
     await state.set_state(Create.university)
-    await ask(screen, data, "Введите <b>университет</b>:")
+    await ask(screen, data, "Введите <b>университет</b>:", optional=True)
 
 
 @router.message(Create.university, PLAIN_TEXT)
 async def create_university(message: Message, state: FSMContext, screen: Screen):
-    data = await state.update_data(university=clean(message.text))
+    data = await state.update_data(university=skip_clean(message.text))
     await state.set_state(Create.phone)
-    await ask(screen, data, "Введите <b>номер телефона</b>:")
+    await ask(screen, data, "Введите <b>номер телефона</b>:", optional=True)
+
+
+async def finish_phone(
+    state: FSMContext, db: Database, config: Config, screen: Screen, phone: str
+):
+    data = await state.update_data(phone=phone, count=1)
+    await state.set_state(Create.confirm)
+    await screen.clear()
+    await send_confirm(state, screen, data, db, config)
 
 
 @router.message(Create.phone, PLAIN_TEXT)
 async def create_phone(
     message: Message, state: FSMContext, db: Database, config: Config, screen: Screen
 ):
+    if message.text.strip() in SKIP_WORDS:
+        return await finish_phone(state, db, config, screen, "")
     phone = normalize_phone(message.text)
     if not phone:
         return await ask(
             screen, await state.get_data(),
             "⚠️ Не похоже на номер телефона.\n"
             "Введите <b>номер телефона</b> ещё раз, например +7 707 123 45 67:",
+            optional=True,
         )
-    data = await state.update_data(phone=phone, count=1)
-    await state.set_state(Create.confirm)
-    await screen.clear()
-    await send_confirm(state, screen, data, db, config)
+    await finish_phone(state, db, config, screen, phone)
+
+
+@router.callback_query(Create.group, F.data == "new:skip")
+async def skip_group(cb: CallbackQuery, state: FSMContext, screen: Screen):
+    await cb.answer()
+    data = await state.update_data(group="")
+    await state.set_state(Create.university)
+    await ask(screen, data, "Введите <b>университет</b>:", optional=True)
+
+
+@router.callback_query(Create.university, F.data == "new:skip")
+async def skip_university(cb: CallbackQuery, state: FSMContext, screen: Screen):
+    await cb.answer()
+    data = await state.update_data(university="")
+    await state.set_state(Create.phone)
+    await ask(screen, data, "Введите <b>номер телефона</b>:", optional=True)
+
+
+@router.callback_query(Create.phone, F.data == "new:skip")
+async def skip_phone(
+    cb: CallbackQuery, state: FSMContext, db: Database, config: Config, screen: Screen
+):
+    await cb.answer()
+    await finish_phone(state, db, config, screen, "")
 
 
 async def send_confirm(
@@ -197,12 +240,12 @@ def confirm_view(data: dict, db: Database, config: Config):
     text = (
         "Проверьте данные:\n\n"
         f"👤 ФИ: <b>{escape(data['full_name'])}</b>\n"
-        f"👥 Группа: {escape(data['group'])}\n"
-        f"🎓 Универ: {escape(data['university'])}\n"
-        f"📞 Телефон: {escape(data['phone'])}\n"
+        f"👥 Группа: {dash(data['group'])}\n"
+        f"🎓 Универ: {dash(data['university'])}\n"
+        f"📞 Телефон: {dash(data['phone'])}\n"
         f"🎟 Количество билетов: <b>{count}</b>"
     )
-    same = db.find_by_phone(data["phone"])
+    same = db.find_by_phone(data["phone"]) if data["phone"] else []
     if same:
         text += "\n\n⚠️ <b>На этот номер уже выдан билет:</b>\n" + "\n".join(
             f"• {ticket_code(config, t['id'])} — {escape(t['full_name'])}" for t in same
@@ -433,7 +476,7 @@ async def stats(message: Message, state: FSMContext, db: Database, screen: Scree
         f"Билетов с повторным сканированием: <b>{repeats}</b>"
     )
     for title, key in (("По администраторам", "created_by_name"), ("По университетам", "university")):
-        top = Counter(t[key] for t in tickets).most_common(10)
+        top = Counter(t[key] for t in tickets if t[key]).most_common(10)
         if top:
             text += f"\n\n<b>{title}:</b>\n" + "\n".join(
                 f"• {escape(name)} — {n}" for name, n in top

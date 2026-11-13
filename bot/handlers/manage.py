@@ -243,7 +243,9 @@ def settings_view(db: Database, config: Config):
         "Бесплатный ключ — на console.groq.com/keys\n\n"
         f"📷 <b>Адрес сканера:</b> {escape(url) if url else 'не задан'}\n"
         "HTTPS-адрес страницы docs/index.html (например, на GitHub Pages). С ним кнопка "
-        "«Сканировать» на клавиатуре сразу открывает камеру."
+        "«Сканировать» на клавиатуре сразу открывает камеру.\n\n"
+        "🔄 <b>Обновление проекта:</b> пришлите в этот чат zip-архив проекта с GitHub "
+        "(Code → Download ZIP) — бот покажет, что изменится, и установит обновление."
     )
     rows = [[("🔑 Задать ключ Groq", "set:groq")], [("📷 Задать адрес сканера", "set:scanner")]]
     if db.get_setting("groq_api_key"):

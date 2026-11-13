@@ -3,6 +3,7 @@
 При первом запуске сам создаёт виртуальное окружение (.venv), ставит зависимости
 и создаёт файл .env, который нужно заполнить. Дальше просто запускает бота.
 """
+import os
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,7 @@ REQUIREMENTS = ROOT / "requirements.txt"
 INSTALLED_MARK = VENV / ".requirements-installed"
 ENV_FILE = ROOT / ".env"
 REQUIRED = ("BOT_TOKEN", "MAIN_ADMIN_IDS")
+RESTART_CODE = 75
 
 
 def stop(message: str) -> None:
@@ -66,10 +68,15 @@ def main() -> None:
         stop("Нужен Python 3.10 или новее.")
     prepare_env_file()
     prepare_venv()
-    try:
-        code = subprocess.run([str(PYTHON), "-m", "bot"], cwd=ROOT).returncode
-    except KeyboardInterrupt:
-        code = 0
+    env = {**os.environ, "TICKET_BOT_SUPERVISED": "1"}
+    while True:
+        try:
+            code = subprocess.run([str(PYTHON), "-m", "bot"], cwd=ROOT, env=env).returncode
+        except KeyboardInterrupt:
+            code = 0
+        if code != RESTART_CODE:      # 75 — бот просит перезапуск после обновления из чата
+            break
+        prepare_venv()
     if code != 0:
         stop("Бот остановился с ошибкой (см. сообщение выше).")
 

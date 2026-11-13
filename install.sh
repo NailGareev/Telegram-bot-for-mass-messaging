@@ -108,7 +108,7 @@ install_with_uv() {
   if [ ! -x "$VENV/bin/python" ] \
      || ! "$VENV/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
     rm -rf "$VENV"
-    "$uv" venv --quiet --python "$PYTHON_VERSION" "$VENV" \
+    "$uv" venv --quiet --seed --python "$PYTHON_VERSION" "$VENV" \
       || die "Не удалось установить Python $PYTHON_VERSION через uv."
   fi
   "$uv" pip install --quiet --python "$VENV/bin/python" -r "$APP_DIR/requirements.txt" \

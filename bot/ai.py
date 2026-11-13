@@ -70,7 +70,8 @@ text, maybe a table, numbered lines, headers, notes).
 Return JSON only: {"records": [{"full_name": "", "group": "", "university": "", \
 "phone": "", "count": 1}]}
 Rules:
-- One record per person. Keep the name as written (e.g. "Иванов Иван").
+- One record per person. Keep the name as written (e.g. "Иванов Иван"). A person with \
+only a name is still a record: group, university and phone are optional.
 - group is the study group (e.g. "ИС-21"); university is the university name or abbreviation.
 - phone exactly as written, digits and "+" only if you can; no invented numbers.
 - count is the number of tickets if the text says so ("2 билета", "x3"), otherwise 1.
