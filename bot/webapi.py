@@ -23,12 +23,12 @@ from PIL import Image, UnidentifiedImageError
 from .access import DEFAULT_PERMS, PERMS, Access, dump_perms, parse_perms, resolve_access
 from .config import BASE_DIR, Config
 from .db import Database
-from .handlers.manage import admin_label, notify_admin
+from .handlers.manage import admin_label, mask, notify_admin
 from .handlers.tickets import MAX_TICKETS_AT_ONCE, clean, normalize_phone
 from .imaging import clamp_box, extract_token, image_size, save_template
 from .service import (
-    current_template, export_file, locate_box, render_preview, sync_menu_button,
-    ticket_file,
+    current_template, export_file, groq_key, locate_box, render_preview, scanner_url,
+    set_scanner_url, sync_menu_button, ticket_file,
 )
 from .ui import can_delete, client_block, fmt_dt, ticket_code
 
@@ -72,6 +72,8 @@ class WebApi:
             "design/default": self.design_default,
             "design/image": self.design_image,
             "reset": self.reset,
+            "settings/get": self.settings_get,
+            "settings/set": self.settings_set,
         }
         for path, handler in post.items():
             app.router.add_post(f"/api/{path}", handler)
@@ -416,7 +418,7 @@ class WebApi:
 
     async def pending_payload(self, previous=None, hint=None) -> dict:
         size = await asyncio.to_thread(image_size, self.config.pending_path)
-        box, source, problem = await locate_box(self.config, size, previous, hint)
+        box, source, problem = await locate_box(self.config, self.db, size, previous, hint)
         if box is None:  # ставим в центр — админ поправит на картинке
             side = min(size) // 3
             box = clamp_box(((size[0] - side) / 2, (size[1] - side) / 2, side), *size)
@@ -493,6 +495,44 @@ class WebApi:
         out = io.BytesIO()
         img.save(out, format="JPEG", quality=86)
         return out.getvalue()
+
+    # ---------- настройки (только главный администратор) ----------
+
+    def settings_payload(self) -> dict:
+        key = groq_key(self.db, self.config)
+        return {
+            "groq_set": bool(key),
+            "groq_hint": mask(key) if key else "",
+            "scanner_url": scanner_url(self.db, self.config),
+        }
+
+    @staticmethod
+    def need_main(request: web.Request) -> None:
+        if not request["access"].is_main:
+            raise ApiError("Доступно только главному администратору", 403)
+
+    async def settings_get(self, request: web.Request) -> web.Response:
+        self.need_main(request)
+        return web.json_response(self.settings_payload())
+
+    async def settings_set(self, request: web.Request) -> web.Response:
+        self.need_main(request)
+        data = await self.body(request)
+        if "groq_api_key" in data:
+            key = str(data["groq_api_key"]).strip()
+            if key and not re.fullmatch(r"[A-Za-z0-9_\-]{20,200}", key):
+                raise ApiError("Не похоже на ключ Groq")
+            if key:
+                self.db.set_setting("groq_api_key", key)
+            else:
+                self.db.delete_setting("groq_api_key")
+        if "scanner_url" in data:
+            url = str(data["scanner_url"]).strip()
+            if url and not re.fullmatch(r'https://[^\s<>"]{4,300}', url):
+                raise ApiError("Адрес сканера должен начинаться с https://")
+            if url != (self.db.get_setting("scanner_url") or ""):
+                await set_scanner_url(self.bot, self.db, self.config, url)
+        return web.json_response(self.settings_payload())
 
     # ---------- сброс ----------
 

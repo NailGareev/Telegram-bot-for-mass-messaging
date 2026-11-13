@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 
 from aiogram import Bot, Dispatcher
@@ -11,11 +10,11 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 from aiohttp import web
 
-from .config import BASE_DIR, Config, load_config
+from .config import Config, load_config
 from .db import Database
 from . import ui
 from .handlers import fallback, manage, tickets
-from .service import AccessMiddleware, sync_menu_button
+from .service import AccessMiddleware, scanner_url, sync_menu_button
 from .tunnel import Tunnel
 from .webapi import PAGE, WebApi
 
@@ -50,7 +49,7 @@ class MiniApp:
             )
             return ""
         log.info("Mini App доступен по адресу %s", base)
-        return versioned(base + "/", PAGE)
+        return ui.versioned(base + "/", PAGE)
 
     async def stop(self) -> None:
         await self.tunnel.stop()
@@ -66,18 +65,8 @@ async def refresh_menu_buttons(bot: Bot, db: Database, config: Config) -> None:
         await sync_menu_button(bot, user_id)
 
 
-def versioned(url: str, page=BASE_DIR / "docs" / "index.html") -> str:
-    """Добавляет к адресу страницы метку её версии. Telegram кэширует
-    страницы мини-приложений, и без метки после обновления страницы
-    админы ещё долго видели бы старую версию."""
-    if not url or not page.exists():
-        return url
-    version = hashlib.md5(page.read_bytes()).hexdigest()[:8]
-    return f"{url}{'&' if '?' in url else '?'}v={version}"
-
-
 def build_dispatcher(db: Database, config: Config, bot_username: str) -> Dispatcher:
-    ui.scanner_url = versioned(config.scanner_url)
+    ui.scanner_url = ui.versioned(scanner_url(db, config))
     dp = Dispatcher(db=db, config=config, bot_username=bot_username)
     # Доступ только у администраторов и только в личных сообщениях:
     # всем остальным бот ничего не отвечает.

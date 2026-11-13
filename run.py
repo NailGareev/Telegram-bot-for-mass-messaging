@@ -30,8 +30,8 @@ def prepare_env_file() -> None:
         shutil.copy(ROOT / ".env.example", ENV_FILE)
         stop(
             f"Создан файл настроек: {ENV_FILE}\n"
-            "Откройте его, впишите BOT_TOKEN и MAIN_ADMIN_IDS "
-            "(и GROQ_API_KEY для смены дизайна) и запустите run.py ещё раз."
+            "Откройте его, впишите BOT_TOKEN и MAIN_ADMIN_IDS и запустите run.py ещё раз.\n"
+            "Ключ Groq и адрес сканера задаются потом в самом боте: раздел «Настройки»."
         )
     values = {}
     for line in ENV_FILE.read_text(encoding="utf-8-sig").splitlines():

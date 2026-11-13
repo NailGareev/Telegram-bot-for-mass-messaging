@@ -17,7 +17,7 @@ from aiogram.types import (
 
 from . import ai, ui
 
-from .access import Access, resolve_access
+from .access import PERMS, Access, parse_perms, resolve_access
 from .config import DEFAULT_BOX, DEFAULT_TEMPLATE, Config
 from .db import Database, Ticket
 from .imaging import Box, find_qr_boxes, qr_payload, render_ticket
@@ -27,6 +27,37 @@ from .ui import client_block, export_txt, fmt_dt, main_menu, ticket_code
 log = logging.getLogger(__name__)
 
 PREVIEW_TOKEN = "PREVIEW_PREVIEW_"
+
+
+def groq_key(db: Database, config: Config) -> str:
+    """Ключ Groq: заданный в боте (раздел «Настройки»), иначе из .env."""
+    return db.get_setting("groq_api_key") or config.groq_api_key
+
+
+def scanner_url(db: Database, config: Config) -> str:
+    """Адрес страницы-сканера: заданный в боте, иначе из .env."""
+    return db.get_setting("scanner_url") or config.scanner_url
+
+
+async def refresh_keyboards(bot: Bot, db: Database, config: Config, text: str) -> None:
+    """Присылает всем администраторам клавиатуру заново (например, когда
+    сменился адрес сканера, зашитый в кнопку «Сканировать»)."""
+    targets = {i: Access(i, True, frozenset(PERMS)) for i in config.main_admin_ids}
+    for a in db.list_admins():
+        if a["user_id"]:
+            targets.setdefault(a["user_id"], Access(a["user_id"], False, parse_perms(a["perms"])))
+    for user_id, access in targets.items():
+        with suppress(TelegramAPIError):
+            await Screen(bot, db, user_id).menu(text, access)
+
+
+async def set_scanner_url(bot: Bot, db: Database, config: Config, url: str) -> None:
+    if url:
+        db.set_setting("scanner_url", url)
+    else:
+        db.delete_setting("scanner_url")
+    ui.scanner_url = ui.versioned(scanner_url(db, config))
+    await refresh_keyboards(bot, db, config, "Кнопка «Сканировать» обновлена.")
 
 
 async def sync_menu_button(bot: Bot, user_id: int, admin: bool = True) -> None:
@@ -44,24 +75,23 @@ def render_preview(path, box: Box, bot_username: str) -> bytes:
 
 
 async def locate_box(
-    config: Config, size: tuple[int, int],
+    config: Config, db: Database, size: tuple[int, int],
     previous: Box | None = None, hint: str | None = None,
 ) -> tuple[Box | None, str, str]:
     """Ищет место под QR на черновике дизайна: ИИ + поиск образца QR на картинке.
     Возвращает (квадрат или None, откуда взят, текст проблемы)."""
     path = config.pending_path
     box, source, problem = None, "", ""
-    if config.groq_api_key:
+    key = groq_key(db, config)
+    if key:
         try:
-            box = await ai.locate_qr(
-                path, config.groq_api_key, config.groq_model, size, previous, hint
-            )
+            box = await ai.locate_qr(path, key, config.groq_model, size, previous, hint)
             source = "ИИ определил место под QR"
         except ai.AIError as e:
             log.warning("Groq: %s", e)
             problem = f"ИИ не справился: {e}"
     else:
-        problem = "Ключ GROQ_API_KEY не задан, ИИ отключён."
+        problem = "Ключ Groq не задан (главный админ задаёт его в «Настройках»), ИИ отключён."
 
     if previous is None:  # первая попытка: уточняем по образцу QR на самой картинке
         detected = await asyncio.to_thread(find_qr_boxes, path)

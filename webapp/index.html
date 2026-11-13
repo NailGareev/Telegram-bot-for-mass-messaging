@@ -280,6 +280,7 @@
     if (can("admins")) tiles += tile("admins", "👥", "Админы", "Доступ и разрешения");
     if (can("design")) tiles += tile("design", "🎨", "Дизайн билета", "Шаблон и место QR");
     if (can("reset")) tiles += tile("reset", "🗑", "Сброс списка", "Удалить все билеты", "danger");
+    if (me.is_main) tiles += tile("settings", "⚙️", "Настройки", "Ключ ИИ и адрес сканера");
     app.innerHTML = header(me.is_main ? "Главный администратор" : "Администратор", "Здравствуйте, " + me.name) +
       '<div class="tiles">' + tiles + "</div>";
     on("[data-go]", "click", function () { go(this.dataset.go); });
@@ -674,6 +675,39 @@
     });
     refresh();
   }
+
+  // ---------- настройки (только главный администратор) ----------
+
+  views.settings = function () {
+    loading("Только для главного админа", "Настройки");
+    api("settings/get").then(function show(data) {
+      app.innerHTML = header("Только для главного админа", "Настройки") +
+        '<form id="groqForm"><label class="field"><span>Ключ Groq — ' + (data.groq_set ? "задан (" + esc(data.groq_hint) + ")" : "не задан") +
+        '</span><input id="groq" type="text" autocomplete="off" autocapitalize="off" placeholder="gsk_…"></label>' +
+        '<div class="row"><button class="btn primary" type="submit">Сохранить ключ</button>' +
+        (data.groq_set ? '<button class="btn fit danger" type="button" id="groqDel">Удалить</button>' : "") + "</div></form>" +
+        '<p class="muted small" style="margin-top:10px">Нужен для смены дизайна билета: ИИ находит место под QR-код. Бесплатный ключ — на console.groq.com/keys</p>' +
+        '<form id="scannerForm" style="margin-top:22px"><label class="field"><span>Адрес страницы-сканера</span>' +
+        '<input id="scanner" type="text" inputmode="url" autocomplete="off" autocapitalize="off" placeholder="https://логин.github.io/репозиторий/" value="' + esc(data.scanner_url) + '"></label>' +
+        '<button class="btn primary" type="submit">Сохранить адрес</button></form>' +
+        '<p class="muted small" style="margin-top:10px">С этим адресом кнопка «Сканировать» на клавиатуре бота сразу открывает камеру. Оставьте поле пустым, чтобы убрать адрес. Сканер в этом приложении работает и без него.</p>';
+      function save(button, body, message) {
+        run(button, function () {
+          return api("settings/set", body).then(function (fresh) { toast(message); show(fresh); });
+        });
+      }
+      $("#groqForm").addEventListener("submit", function (event) {
+        event.preventDefault();
+        if (!$("#groq").value.trim()) return toast("Введите ключ", true);
+        save(this.querySelector("button"), { groq_api_key: $("#groq").value }, "Ключ сохранён");
+      });
+      on("#groqDel", "click", function () { save(this, { groq_api_key: "" }, "Ключ удалён"); });
+      $("#scannerForm").addEventListener("submit", function (event) {
+        event.preventDefault();
+        save(this.querySelector("button"), { scanner_url: $("#scanner").value }, "Адрес сохранён");
+      });
+    }).catch(failed);
+  };
 
   // ---------- сброс ----------
 

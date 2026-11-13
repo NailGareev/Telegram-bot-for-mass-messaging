@@ -59,6 +59,13 @@ def resolve_access(user: User, db: Database, config: Config) -> Access | None:
     return Access(user.id, False, parse_perms(row["perms"]))
 
 
+class IsMain(BaseFilter):
+    """Пропускает только главных администраторов."""
+
+    async def __call__(self, event: TelegramObject, access: Access) -> bool:
+        return access.is_main
+
+
 class Perm(BaseFilter):
     """Пропускает только тех, у кого есть разрешение на раздел."""
 

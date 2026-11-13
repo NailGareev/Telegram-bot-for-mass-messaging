@@ -1,6 +1,7 @@
 """Кнопки, клавиатуры и форматирование текстов."""
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from html import escape
 
@@ -14,7 +15,7 @@ from aiogram.types import (
 )
 
 from .access import Access
-from .config import Config
+from .config import BASE_DIR, Config
 from .db import Ticket
 
 BTN_NEW = "🎟 Новый билет"
@@ -25,10 +26,11 @@ BTN_STATS = "📊 Статистика"
 BTN_ADMINS = "👥 Админы"
 BTN_DESIGN = "🎨 Дизайн билета"
 BTN_RESET = "🗑 Сброс списка"
+BTN_SETTINGS = "⚙️ Настройки"
 
 MENU_TEXTS = {
     BTN_NEW, BTN_SCAN, BTN_LIST, BTN_SEARCH, BTN_STATS,
-    BTN_ADMINS, BTN_DESIGN, BTN_RESET,
+    BTN_ADMINS, BTN_DESIGN, BTN_RESET, BTN_SETTINGS,
 }
 # Обычный текст, введённый пользователем (не кнопка меню и не команда).
 PLAIN_TEXT = F.text & ~F.text.in_(MENU_TEXTS) & ~F.text.startswith("/")
@@ -38,6 +40,16 @@ PLAIN_TEXT = F.text & ~F.text.in_(MENU_TEXTS) & ~F.text.startswith("/")
 scanner_url = ""
 # Адрес мини-приложения (появляется после запуска веб-сервера и туннеля).
 miniapp_url = ""
+
+
+def versioned(url: str, page=BASE_DIR / "docs" / "index.html") -> str:
+    """Добавляет к адресу страницы метку её версии. Telegram кэширует
+    страницы мини-приложений, и без метки после обновления страницы
+    админы ещё долго видели бы старую версию."""
+    if not url or not page.exists():
+        return url
+    version = hashlib.md5(page.read_bytes()).hexdigest()[:8]
+    return f"{url}{'&' if '?' in url else '?'}v={version}"
 
 
 def main_menu(access: Access) -> ReplyKeyboardMarkup:
@@ -60,6 +72,8 @@ def main_menu(access: Access) -> ReplyKeyboardMarkup:
     ):
         if access.can(perm):
             buttons.append(KeyboardButton(text=text))
+    if access.is_main:
+        buttons.append(KeyboardButton(text=BTN_SETTINGS))
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 

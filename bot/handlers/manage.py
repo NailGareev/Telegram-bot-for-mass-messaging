@@ -14,15 +14,17 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from PIL import UnidentifiedImageError
 
-from ..access import DEFAULT_PERMS, PERMS, Access, Perm, dump_perms, parse_perms
+from ..access import DEFAULT_PERMS, PERMS, Access, IsMain, Perm, dump_perms, parse_perms
 from ..config import Config
 from ..db import Database
 from ..imaging import Box, clamp_box, image_size, save_template
 from ..service import (
-    Screen, current_template, download, export_file, image_file_id, locate_box,
-    render_preview, sync_menu_button,
+    Screen, current_template, download, export_file, groq_key, image_file_id,
+    locate_box, render_preview, scanner_url, set_scanner_url, sync_menu_button,
 )
-from ..ui import BTN_ADMINS, BTN_DESIGN, BTN_RESET, CANCEL, PLAIN_TEXT, cancel_kb, inline
+from ..ui import (
+    BTN_ADMINS, BTN_DESIGN, BTN_RESET, BTN_SETTINGS, CANCEL, PLAIN_TEXT, cancel_kb, inline,
+)
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +32,11 @@ router = Router()
 
 class AddAdmin(StatesGroup):
     waiting = State()
+
+
+class Settings(StatesGroup):
+    groq = State()
+    scanner = State()
 
 
 class Design(StatesGroup):
@@ -220,6 +227,105 @@ async def admin_add_finish(
     await screen.show(*admin_view(a, access))
 
 
+# ---------- настройки (только главный администратор) ----------
+
+
+def mask(secret: str) -> str:
+    return "…" + secret[-4:] if len(secret) > 8 else "…"
+
+
+def settings_view(db: Database, config: Config):
+    key, url = groq_key(db, config), scanner_url(db, config)
+    text = (
+        "⚙️ <b>Настройки</b>\n<i>Этот раздел виден только главному администратору.</i>\n\n"
+        f"🔑 <b>Ключ Groq:</b> {'задан (' + escape(mask(key)) + ')' if key else 'не задан'}\n"
+        "Нужен для смены дизайна билета: ИИ находит место под QR-код. "
+        "Бесплатный ключ — на console.groq.com/keys\n\n"
+        f"📷 <b>Адрес сканера:</b> {escape(url) if url else 'не задан'}\n"
+        "HTTPS-адрес страницы docs/index.html (например, на GitHub Pages). С ним кнопка "
+        "«Сканировать» на клавиатуре сразу открывает камеру."
+    )
+    rows = [[("🔑 Задать ключ Groq", "set:groq")], [("📷 Задать адрес сканера", "set:scanner")]]
+    if db.get_setting("groq_api_key"):
+        rows[0].append(("Удалить", "set:groq:del"))
+    if db.get_setting("scanner_url"):
+        rows[1].append(("Убрать", "set:scanner:del"))
+    return text, inline(*rows)
+
+
+@router.message(F.text == BTN_SETTINGS, IsMain())
+async def settings_menu(
+    message: Message, state: FSMContext, db: Database, config: Config, screen: Screen
+):
+    await state.clear()
+    await screen.show(*settings_view(db, config))
+
+
+@router.callback_query(F.data == "set:groq", IsMain())
+async def settings_groq_ask(cb: CallbackQuery, state: FSMContext, screen: Screen):
+    await state.set_state(Settings.groq)
+    await cb.answer()
+    await screen.show(
+        "🔑 Пришлите ключ Groq (начинается с <code>gsk_</code>).\n"
+        "Сообщение с ключом я сразу удалю из чата.",
+        cancel_kb(),
+    )
+
+
+@router.message(Settings.groq, PLAIN_TEXT, IsMain())
+async def settings_groq_save(
+    message: Message, state: FSMContext, db: Database, config: Config, screen: Screen
+):
+    key = message.text.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{20,200}", key):
+        return await screen.show(
+            "⚠️ Не похоже на ключ Groq. Пришлите ключ целиком, без пробелов:", cancel_kb()
+        )
+    db.set_setting("groq_api_key", key)
+    await state.clear()
+    await screen.show(*settings_view(db, config))
+
+
+@router.callback_query(F.data == "set:scanner", IsMain())
+async def settings_scanner_ask(cb: CallbackQuery, state: FSMContext, screen: Screen):
+    await state.set_state(Settings.scanner)
+    await cb.answer()
+    await screen.show(
+        "📷 Пришлите адрес страницы-сканера, например\n"
+        "<code>https://логин.github.io/репозиторий/</code>",
+        cancel_kb(),
+    )
+
+
+@router.message(Settings.scanner, PLAIN_TEXT, IsMain())
+async def settings_scanner_save(
+    message: Message, bot: Bot, state: FSMContext, db: Database, config: Config,
+    screen: Screen,
+):
+    url = message.text.strip()
+    if not re.fullmatch(r"https://[^\s<>\"]{4,300}", url):
+        return await screen.show(
+            "⚠️ Адрес должен начинаться с <code>https://</code>. Пришлите ещё раз:", cancel_kb()
+        )
+    await state.clear()
+    await set_scanner_url(bot, db, config, url)
+    await screen.show(*settings_view(db, config))
+
+
+@router.callback_query(F.data.in_({"set:groq:del", "set:scanner:del"}), IsMain())
+async def settings_delete(
+    cb: CallbackQuery, bot: Bot, state: FSMContext, db: Database, config: Config,
+    screen: Screen,
+):
+    await state.clear()
+    if cb.data == "set:groq:del":
+        db.delete_setting("groq_api_key")
+    else:
+        await set_scanner_url(bot, db, config, "")
+    await cb.answer("Удалено")
+    await screen.show(*settings_view(db, config))
+
+
 # ---------- полный сброс ----------
 
 
@@ -338,7 +444,7 @@ async def propose(
     """Определяет место под QR (ИИ + поиск образца QR на картинке) и шлёт предпросмотр."""
     size = await asyncio.to_thread(image_size, config.pending_path)
     await screen.show("🤖 ИИ ищет место для QR-кода…")
-    box, source, problem = await locate_box(config, size, previous, hint)
+    box, source, problem = await locate_box(config, screen.db, size, previous, hint)
 
     if box is None:
         await state.set_state(Design.fix)
