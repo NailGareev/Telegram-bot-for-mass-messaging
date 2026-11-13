@@ -14,11 +14,14 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
+from .. import ui
 from ..access import Access, Perm
 from ..config import Config
 from ..db import Database
 from ..imaging import decode_qr, extract_token
-from ..service import Screen, do_scan, download, export_file, image_file_id, ticket_file
+from ..service import (
+    Screen, do_scan, download, export_file, image_file_id, sync_menu_button, ticket_file,
+)
 from ..ui import (
     BTN_LIST, BTN_NEW, BTN_SCAN, BTN_SEARCH, BTN_STATS, CANCEL, PLAIN_TEXT,
     can_delete, cancel_kb, client_block, inline, list_line, ticket_actions,
@@ -54,6 +57,8 @@ class Search(StatesGroup):
 def welcome(access: Access) -> str:
     role = "главный администратор" if access.is_main else "администратор"
     text = f"Здравствуйте! Вы — <b>{role}</b>.\nДоступные разделы — на клавиатуре ниже."
+    if ui.miniapp_url:
+        text += "\nВсё то же самое — в приложении: кнопка <b>Mini App</b> слева от поля ввода."
     if not access.can("list"):
         text += "\n\nВ «Списке» и «Поиске» вам видны билеты, которые выдали вы."
     return text
@@ -76,6 +81,7 @@ async def start(message: Message, state: FSMContext, access: Access, screen: Scr
     await state.clear()
     await screen.clear()
     await screen.menu(welcome(access), access)
+    await sync_menu_button(message.bot, message.from_user.id)
 
 
 @router.message(Command("cancel"))

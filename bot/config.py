@@ -24,6 +24,12 @@ class Config:
     data_dir: Path
     ticket_prefix: str
     scanner_url: str = ""
+    # Мини-приложение: включено ли, публичный HTTPS-адрес (если есть свой),
+    # локальный порт веб-сервера и разрешён ли автоматический туннель.
+    miniapp: bool = True
+    webapp_url: str = ""
+    webapp_port: int = 8080
+    tunnel: bool = True
 
     @property
     def db_path(self) -> Path:
@@ -63,7 +69,22 @@ def load_config() -> Config:
     if scanner_url and not scanner_url.startswith("https://"):
         raise SystemExit("SCANNER_URL должен начинаться с https://")
 
+    webapp_url = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+    if webapp_url and not webapp_url.startswith("https://"):
+        raise SystemExit("WEBAPP_URL должен начинаться с https://")
+    try:
+        webapp_port = int(os.getenv("WEBAPP_PORT", "").strip() or 8080)
+    except ValueError:
+        raise SystemExit("WEBAPP_PORT должен быть числом")
+
+    def flag(name: str) -> bool:
+        return os.getenv(name, "").strip().lower() not in {"off", "0", "no", "false"}
+
     return Config(
+        miniapp=flag("MINI_APP"),
+        webapp_url=webapp_url,
+        webapp_port=webapp_port,
+        tunnel=flag("TUNNEL"),
         bot_token=token,
         main_admin_ids=main_ids,
         groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),

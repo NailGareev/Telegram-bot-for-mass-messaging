@@ -14,22 +14,19 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from PIL import UnidentifiedImageError
 
-from .. import ai
 from ..access import DEFAULT_PERMS, PERMS, Access, Perm, dump_perms, parse_perms
 from ..config import Config
 from ..db import Database
-from ..imaging import (
-    Box, clamp_box, find_qr_boxes, image_size, qr_payload, render_ticket, save_template,
+from ..imaging import Box, clamp_box, image_size, save_template
+from ..service import (
+    Screen, current_template, download, export_file, image_file_id, locate_box,
+    render_preview, sync_menu_button,
 )
-from ..service import Screen, current_template, download, export_file, image_file_id
 from ..ui import BTN_ADMINS, BTN_DESIGN, BTN_RESET, CANCEL, PLAIN_TEXT, cancel_kb, inline
 
 log = logging.getLogger(__name__)
 
 router = Router()
-
-PREVIEW_TOKEN = "PREVIEW_PREVIEW_"
-
 
 class AddAdmin(StatesGroup):
     waiting = State()
@@ -97,6 +94,7 @@ async def notify_admin(bot: Bot, db: Database, a, text: str) -> bool:
     target = Access(a["user_id"], False, parse_perms(a["perms"]))
     try:
         await Screen(bot, db, a["user_id"]).menu(text, target)
+        await sync_menu_button(bot, a["user_id"])
         return True
     except TelegramAPIError:
         return False
@@ -163,7 +161,7 @@ async def admin_toggle(cb: CallbackQuery, db: Database, access: Access):
 
 @router.callback_query(F.data.startswith("adm:del:"), Perm("admins"))
 async def admin_remove(
-    cb: CallbackQuery, state: FSMContext, db: Database, config: Config,
+    cb: CallbackQuery, bot: Bot, state: FSMContext, db: Database, config: Config,
     access: Access, screen: Screen,
 ):
     a = db.get_admin(int(cb.data.rsplit(":", 1)[1]))
@@ -171,6 +169,8 @@ async def admin_remove(
     if problem:
         return await cb.answer(problem, show_alert=True)
     db.remove_admin(a["id"])
+    if a["user_id"]:
+        await sync_menu_button(bot, a["user_id"], admin=False)
     await state.clear()
     await cb.answer("Админ убран")
     await screen.show(*admins_view(db, config))
@@ -265,8 +265,7 @@ FIX_KB = inline([("🔄 Попросить ИИ ещё раз", "dsn:retry")], [
 
 
 def preview(path, box: Box, bot_username: str) -> BufferedInputFile:
-    png = render_ticket(path, box, qr_payload(bot_username, PREVIEW_TOKEN))
-    return BufferedInputFile(png, filename="preview.png")
+    return BufferedInputFile(render_preview(path, box, bot_username), filename="preview.png")
 
 
 @router.message(F.text == BTN_DESIGN, Perm("design"))
@@ -337,46 +336,15 @@ async def propose(
     hint: str | None = None,
 ):
     """Определяет место под QR (ИИ + поиск образца QR на картинке) и шлёт предпросмотр."""
-    path = config.pending_path
-    size = await asyncio.to_thread(image_size, path)
+    size = await asyncio.to_thread(image_size, config.pending_path)
     await screen.show("🤖 ИИ ищет место для QR-кода…")
-    box, source, problem = None, "", ""
-
-    if config.groq_api_key:
-        try:
-            box = await ai.locate_qr(
-                path, config.groq_api_key, config.groq_model, size, previous, hint
-            )
-            source = "ИИ определил место под QR"
-        except ai.AIError as e:
-            log.warning("Groq: %s", e)
-            problem = f"ИИ не справился: {escape(str(e))}"
-    else:
-        problem = "Ключ GROQ_API_KEY не задан, ИИ отключён."
-
-    if previous is None:  # первая попытка: уточняем по образцу QR на самой картинке
-        detected = await asyncio.to_thread(find_qr_boxes, path)
-        if detected and box:
-            cx, cy = box[0] + box[2] / 2, box[1] + box[2] / 2
-            near = min(
-                detected,
-                key=lambda d: (d[0] + d[2] / 2 - cx) ** 2 + (d[1] + d[2] / 2 - cy) ** 2,
-            )
-            overlap = (
-                min(box[0] + box[2], near[0] + near[2]) > max(box[0], near[0])
-                and min(box[1] + box[2], near[1] + near[2]) > max(box[1], near[1])
-            )
-            if overlap:
-                box, source = near, "ИИ нашёл QR, положение уточнено по образцу"
-        elif detected:
-            box = max(detected, key=lambda d: d[2])
-            source = "На картинке найден образец QR-кода"
+    box, source, problem = await locate_box(config, size, previous, hint)
 
     if box is None:
         await state.set_state(Design.fix)
         await state.update_data(box=previous)
         return await screen.show(
-            f"{problem}\n\nУкажите место вручную — три числа через пробел: "
+            f"{escape(problem)}\n\nУкажите место вручную — три числа через пробел: "
             f"<code>x y размер</code> (в пикселях, картинка {size[0]}×{size[1]}, "
             "x и y — левый верхний угол квадрата).",
             FIX_KB,
