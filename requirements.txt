@@ -1,0 +1,6 @@
+aiogram>=3.13,<4
+qrcode[pil]>=7.4
+Pillow>=10
+opencv-python-headless>=4.8
+python-dotenv>=1.0
+tzdata
