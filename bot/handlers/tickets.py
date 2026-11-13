@@ -28,6 +28,7 @@ router.callback_query.filter(Role())
 
 MAX_FIELD = 100
 LIST_INLINE_LIMIT = 150  # больше — показываем только файл
+MAX_TICKETS_AT_ONCE = 10
 
 
 class Create(StatesGroup):
@@ -142,27 +143,64 @@ async def create_phone(message: Message, state: FSMContext, db: Database, config
         return await message.answer(
             "Не похоже на номер телефона. Введите ещё раз, например +7 707 123 45 67:"
         )
-    data = await state.update_data(phone=phone)
+    data = await state.update_data(phone=phone, count=1)
     await state.set_state(Create.confirm)
+    text, kb = confirm_view(data, db, config)
+    await message.answer(text, reply_markup=kb)
+
+
+def confirm_view(data: dict, db: Database, config: Config):
+    count = data.get("count", 1)
     text = (
         "Проверьте данные:\n\n"
         f"👤 ФИ: <b>{escape(data['full_name'])}</b>\n"
         f"👥 Группа: {escape(data['group'])}\n"
         f"🎓 Универ: {escape(data['university'])}\n"
-        f"📞 Телефон: {escape(phone)}"
+        f"📞 Телефон: {escape(data['phone'])}\n"
+        f"🎟 Количество билетов: <b>{count}</b>"
     )
-    same = db.find_by_phone(phone)
+    same = db.find_by_phone(data["phone"])
     if same:
         text += "\n\n⚠️ <b>На этот номер уже выдан билет:</b>\n" + "\n".join(
             f"• {ticket_code(config, t['id'])} — {escape(t['full_name'])}" for t in same
         )
-    await message.answer(
-        text,
-        reply_markup=inline(
-            [("✅ Выдать билет", "new:ok")],
-            [("✏️ Ввести заново", "new:redo"), ("❌ Отмена", "new:cancel")],
-        ),
+    text += (
+        "\n\nНесколько билетов на эти данные — выберите количество кнопкой "
+        f"или отправьте число (до {MAX_TICKETS_AT_ONCE})."
     )
+    ok = "✅ Выдать билет" if count == 1 else f"✅ Выдать билеты: {count} шт."
+    kb = inline(
+        [(ok, "new:ok")],
+        [(f"·{n}·" if n == count else str(n), f"new:qty:{n}") for n in range(1, 6)],
+        [("✏️ Ввести заново", "new:redo"), ("❌ Отмена", "new:cancel")],
+    )
+    return text, kb
+
+
+@router.callback_query(Create.confirm, F.data.startswith("new:qty:"))
+async def create_quantity(cb: CallbackQuery, state: FSMContext, db: Database, config: Config):
+    count = int(cb.data.rsplit(":", 1)[1])
+    data = await state.get_data()
+    if data.get("count") != count:
+        data = await state.update_data(count=count)
+        text, kb = confirm_view(data, db, config)
+        await cb.message.edit_text(text, reply_markup=kb)
+    await cb.answer(f"Билетов: {count}")
+
+
+@router.message(Create.confirm, PLAIN_TEXT)
+async def create_quantity_typed(
+    message: Message, state: FSMContext, db: Database, config: Config
+):
+    raw = message.text.strip()
+    if not raw.isdigit() or not 1 <= int(raw) <= MAX_TICKETS_AT_ONCE:
+        return await message.answer(
+            f"Отправьте количество билетов числом от 1 до {MAX_TICKETS_AT_ONCE} "
+            "или нажмите кнопку под сообщением с данными."
+        )
+    data = await state.update_data(count=int(raw))
+    text, kb = confirm_view(data, db, config)
+    await message.answer(text, reply_markup=kb)
 
 
 @router.callback_query(Create.confirm, F.data == "new:ok")
@@ -171,17 +209,24 @@ async def create_confirm(
 ):
     data = await state.get_data()
     await state.clear()
-    t = db.create_ticket(
-        data["full_name"], data["group"], data["university"], data["phone"],
-        cb.from_user.id, cb.from_user.full_name,
-    )
+    count = max(1, min(int(data.get("count", 1)), MAX_TICKETS_AT_ONCE))
+    # У каждого билета свой номер и свой уникальный QR.
+    tickets = [
+        db.create_ticket(
+            data["full_name"], data["group"], data["university"], data["phone"],
+            cb.from_user.id, cb.from_user.full_name,
+        )
+        for _ in range(count)
+    ]
     await cb.message.edit_reply_markup()
-    await cb.answer("Билет создан")
-    await cb.message.answer_document(
-        await ticket_file(t, db, config, bot_username),
-        caption="✅ Билет выдан\n\n" + client_block(t, config),
-        reply_markup=menu_for(cb, config),
-    )
+    await cb.answer("Билет создан" if count == 1 else f"Создано билетов: {count}")
+    for n, t in enumerate(tickets, 1):
+        head = "✅ Билет выдан" if count == 1 else f"✅ Билет {n} из {count}"
+        await cb.message.answer_document(
+            await ticket_file(t, db, config, bot_username),
+            caption=f"{head}\n\n" + client_block(t, config),
+            reply_markup=menu_for(cb, config),
+        )
 
 
 @router.callback_query(Create.confirm, F.data == "new:redo")
@@ -344,7 +389,7 @@ async def search_run(message: Message, db: Database, config: Config):
     if not found:
         return await message.answer("Ничего не найдено. Попробуйте другой запрос:")
     if len(found) == 1:
-        return await send_card(message, found[0], config)
+        return await send_card(message, found[0], config, message.from_user.id)
     await message.answer(
         "Найдено:",
         reply_markup=inline(
@@ -356,13 +401,20 @@ async def search_run(message: Message, db: Database, config: Config):
     )
 
 
-async def send_card(message: Message, t, config: Config, is_main: bool | None = None):
-    if is_main is None:
-        is_main = config.is_main(message.from_user.id)
-    await message.answer(
-        ticket_card(t, config),
-        reply_markup=ticket_actions(t["id"], is_main, bool(t["scan_count"])),
+def can_delete(t, config: Config, user_id: int) -> bool:
+    """Удалить билет может главный админ или тот админ, который его выдал."""
+    return config.is_main(user_id) or t["created_by"] == user_id
+
+
+def actions_for(t, config: Config, user_id: int):
+    return ticket_actions(
+        t["id"], config.is_main(user_id), bool(t["scan_count"]),
+        can_delete(t, config, user_id),
     )
+
+
+async def send_card(message: Message, t, config: Config, user_id: int):
+    await message.answer(ticket_card(t, config), reply_markup=actions_for(t, config, user_id))
 
 
 @router.callback_query(F.data.startswith("t:"))
@@ -372,11 +424,16 @@ async def ticket_action(cb: CallbackQuery, db: Database, config: Config, bot_use
     t = db.get_ticket(int(raw_id))
     if not t:
         return await cb.answer("Билет не найден (удалён?)", show_alert=True)
-    if action in {"unscan", "del", "delok"} and not is_main:
+    if action == "unscan" and not is_main:
         return await cb.answer("Доступно только главному администратору", show_alert=True)
+    if action in {"del", "delok"} and not can_delete(t, config, cb.from_user.id):
+        return await cb.answer(
+            "Удалить билет может главный администратор или админ, который его выдал",
+            show_alert=True,
+        )
 
     if action == "show":
-        await send_card(cb.message, t, config, is_main)
+        await send_card(cb.message, t, config, cb.from_user.id)
     elif action == "send":
         await cb.message.answer_document(
             await ticket_file(t, db, config, bot_username), caption=client_block(t, config)
@@ -385,7 +442,7 @@ async def ticket_action(cb: CallbackQuery, db: Database, config: Config, bot_use
         db.reset_scan(t["id"])
         t = db.get_ticket(t["id"])
         await cb.message.edit_text(
-            ticket_card(t, config), reply_markup=ticket_actions(t["id"], True, False)
+            ticket_card(t, config), reply_markup=actions_for(t, config, cb.from_user.id)
         )
     elif action == "del":
         await cb.message.edit_reply_markup(
@@ -395,7 +452,7 @@ async def ticket_action(cb: CallbackQuery, db: Database, config: Config, bot_use
         )
     elif action == "keep":
         await cb.message.edit_reply_markup(
-            reply_markup=ticket_actions(t["id"], is_main, bool(t["scan_count"]))
+            reply_markup=actions_for(t, config, cb.from_user.id)
         )
     elif action == "delok":
         db.delete_ticket(t["id"])

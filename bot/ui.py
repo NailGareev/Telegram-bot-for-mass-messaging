@@ -117,11 +117,13 @@ def ticket_card(t: Ticket, config: Config) -> str:
     return text
 
 
-def ticket_actions(ticket_id: int, is_main: bool, scanned: bool) -> InlineKeyboardMarkup:
+def ticket_actions(
+    ticket_id: int, is_main: bool, scanned: bool, can_delete: bool
+) -> InlineKeyboardMarkup:
     rows = [[("🔁 Прислать билет ещё раз", f"t:send:{ticket_id}")]]
-    if is_main:
-        if scanned:
-            rows.append([("↩️ Снять отметку о проходе", f"t:unscan:{ticket_id}")])
+    if is_main and scanned:
+        rows.append([("↩️ Снять отметку о проходе", f"t:unscan:{ticket_id}")])
+    if can_delete:
         rows.append([("🗑 Удалить билет", f"t:del:{ticket_id}")])
     return inline(*rows)
 
