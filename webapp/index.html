@@ -45,39 +45,6 @@
   .small { font-size: 13px; }
   .center { text-align: center; }
 
-  /* Главная */
-  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .tile {
-    display: flex; flex-direction: column; gap: 10px; align-items: flex-start;
-    min-height: 108px; padding: 16px; border: 0; border-radius: 20px; text-align: left;
-    background: var(--card); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer;
-    transition: transform .12s ease, background .12s ease;
-  }
-  .tile:active { transform: scale(.975); background: var(--card-strong); }
-  .tile .icon { font-size: 26px; line-height: 1; }
-  .tile b { font-weight: 600; font-size: 16px; }
-  .tile span { font-size: 13px; color: var(--muted); }
-  .tile.primary { grid-column: span 2; min-height: 0; flex-direction: row; align-items: center; gap: 14px;
-    color: #3a1f17; background: linear-gradient(180deg, #fff3b0, var(--gold)); box-shadow: 0 10px 26px rgba(233, 196, 106, .25); }
-  .tile.primary span { color: rgba(58, 31, 23, .7); }
-  .tile.danger b { color: var(--bad); }
-
-  /* Кнопки и поля */
-  .btn {
-    display: block; width: 100%; padding: 15px 18px; border: 0; border-radius: 16px;
-    font-weight: 600; font-size: 16px; text-align: center; cursor: pointer;
-    color: var(--cream); background: var(--card-strong); box-shadow: inset 0 0 0 1px var(--line);
-    transition: transform .12s ease, opacity .12s ease;
-  }
-  .btn:active { transform: scale(.985); }
-  .btn + .btn { margin-top: 10px; }
-  .btn.primary { color: #3a1f17; background: linear-gradient(180deg, #fff3b0, var(--gold)); box-shadow: 0 10px 26px rgba(233, 196, 106, .25); }
-  .btn.danger { color: var(--bad); }
-  .btn[disabled] { opacity: .5; cursor: default; }
-  .row { display: flex; gap: 10px; }
-  .row > .btn { margin-top: 0; }
-  .row > .fit { width: auto; flex: none; padding-left: 20px; padding-right: 20px; }
-
   label.field { display: block; margin-bottom: 12px; }
   label.field > span { display: block; margin: 0 0 6px 4px; font-size: 13px; color: var(--muted); }
   input[type=text], input[type=tel], input[type=search] {
@@ -146,6 +113,69 @@
   .preview { display: block; width: 100%; border-radius: 14px; box-shadow: 0 0 0 1px var(--line); background: var(--card); min-height: 60px; }
   .preview.pick { cursor: crosshair; touch-action: manipulation; }
 
+  /* ---------- Кнопки: единый стиль ----------
+     Любая кнопка приложения — плитка раздела, действие, строка списка, шаг
+     счётчика — имеет одну форму: тонкая золотая рамка, одно скругление, одна
+     реакция на нажатие. Варианты отличаются только заливкой:
+     .primary — главное действие (золотая), .danger — удаление (красная рамка). */
+  .btn, .tile, .item, .stepper button {
+    --edge: rgba(233, 196, 106, .42);
+    appearance: none; -webkit-appearance: none;
+    border: 1.5px solid var(--edge); border-radius: 16px;
+    background: rgba(255, 244, 214, .06); box-shadow: none;
+    color: var(--cream); font-weight: 600; font-size: 16px; line-height: 1.25;
+    cursor: pointer; user-select: none; -webkit-user-select: none;
+    transition: transform .12s ease, background .12s ease, border-color .12s ease, opacity .12s ease;
+  }
+  .btn:active, .tile:active, .item:active, .stepper button:active {
+    transform: scale(.98); background: rgba(255, 244, 214, .14); border-color: var(--gold);
+  }
+  .btn:focus-visible, .tile:focus-visible, .item:focus-visible, .stepper button:focus-visible,
+  .switch:focus-visible, .finder:focus-visible { outline: 2px solid var(--cream); outline-offset: 2px; }
+  .btn[disabled], .stepper button[disabled] { opacity: .45; cursor: default; transform: none; }
+
+  .primary {
+    --edge: var(--gold); color: #3a1f17;
+    background: linear-gradient(180deg, #fff3b0, var(--gold));
+    box-shadow: 0 8px 22px rgba(233, 196, 106, .22);
+  }
+  .primary:active { background: linear-gradient(180deg, #ffe98f, #d9b253); }
+  .danger { --edge: rgba(255, 143, 133, .55); color: var(--bad); background: rgba(255, 143, 133, .07); }
+  .danger:active { background: rgba(255, 143, 133, .16); border-color: var(--bad); }
+
+  /* Значок: линия того же цвета, что и подпись */
+  .ic { flex: none; width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8;
+    stroke-linecap: round; stroke-linejoin: round; }
+
+  /* Действие */
+  .btn { display: flex; align-items: center; justify-content: center; gap: 10px;
+    width: 100%; min-height: 54px; padding: 8px 18px; text-align: center; }
+  .btn + .btn { margin-top: 10px; }
+  .row { display: flex; gap: 10px; }
+  .row > .btn { margin-top: 0; }
+  .row > .fit { width: auto; flex: none; }
+
+  /* Плитка раздела на главной */
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .tile { display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
+    min-height: 116px; padding: 14px; text-align: left; }
+  .tile .badge { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12px;
+    color: var(--gold); background: rgba(233, 196, 106, .14); }
+  .tile .badge .ic { width: 22px; height: 22px; }
+  .tile b { display: block; font-weight: 600; }
+  .tile small { display: block; margin-top: 2px; font-size: 13px; font-weight: 400; color: var(--muted); }
+  .tile.wide { grid-column: span 2; flex-direction: row; align-items: center; min-height: 0; gap: 14px; }
+  .tile.primary .badge { color: #3a1f17; background: rgba(58, 31, 23, .13); }
+  .tile.primary small { color: rgba(58, 31, 23, .72); }
+  .tile.danger .badge { color: var(--bad); background: rgba(255, 143, 133, .13); }
+
+  /* Строка списка */
+  .item { font-weight: 400; }
+  .item > .ic { color: var(--gold); width: 18px; height: 18px; }
+
+  /* Счётчик */
+  .stepper button { display: grid; place-items: center; width: 54px; height: 54px; padding: 0; }
+
   #toast { position: fixed; left: 16px; right: 16px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 10;
     max-width: 448px; margin: 0 auto; padding: 13px 16px; border-radius: 14px; text-align: center; font-weight: 500;
     color: #2b1612; background: var(--cream); box-shadow: 0 12px 30px rgba(0, 0, 0, .4);
@@ -172,6 +202,48 @@
   var app = document.getElementById("app");
   var me = null;
   var stack = [];
+
+  // ---------- значки ----------
+
+  var ICONS = {
+    scan: "M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M4 12h16",
+    ticket: "M4 8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2a2 2 0 0 0 0 4v2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-2a2 2 0 0 0 0-4zM14 6v2M14 11v2M14 16v2",
+    list: "M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01",
+    stats: "M5 20v-8M12 20V4M19 20v-5",
+    admins: "M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20M10 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM20 20v-1.5a3.5 3.5 0 0 0-2.5-3.35M15.5 4.2a3.5 3.5 0 0 1 0 6.6",
+    design: "M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM4 16l4.5-4.5a1.5 1.5 0 0 1 2 0L16 17M14 15l1.5-1.5a1.5 1.5 0 0 1 2 0L20 16M9 8.5h.01",
+    trash: "M4 7h16M10 11v6M14 11v6M6 7l1 12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-12M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2",
+    settings: "M4 7h10M18 7h2M4 17h2M10 17h10M16 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM8 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
+    send: "M20 4l-9.5 9.5M20 4l-6 16-3.5-6.5L4 10z",
+    download: "M12 4v11M7.5 11l4.5 4.5 4.5-4.5M5 20h14",
+    upload: "M12 16V5M7.5 9L12 4.5 16.5 9M5 20h14",
+    plus: "M12 5v14M5 12h14",
+    minus: "M5 12h14",
+    check: "M5 12.5l4.5 4.5L19 7.5",
+    close: "M6 6l12 12M18 6L6 18",
+    undo: "M8 7L4 11l4 4M4 11h10.5a4.5 4.5 0 0 1 0 9H12",
+    home: "M4 11l8-7 8 7M6 10v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-9",
+    refresh: "M20 11a8 8 0 0 0-14.5-4M4 4v4h4M4 13a8 8 0 0 0 14.5 4M20 20v-4h-4",
+    chevron: "M9 6l6 6-6 6"
+  };
+  function ic(name) {
+    return '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="' + ICONS[name] + '"/></svg>';
+  }
+  // Значок кнопки-действия: по её id или по атрибуту data-icon.
+  var BUTTON_ICONS = {
+    submit: "ticket", again: "plus", home: "home", scan: "scan", "export": "download", send: "send",
+    unscan: "undo", "delete": "trash", remove: "trash", upload: "upload", "default": "undo",
+    save: "check", cancel: "close", groqDel: "trash", reset: "trash"
+  };
+  function decorate() {
+    Array.prototype.forEach.call(document.querySelectorAll("#app .btn"), function (button) {
+      var name = button.dataset.icon || BUTTON_ICONS[button.id];
+      if (name && !button.querySelector(".ic")) button.insertAdjacentHTML("afterbegin", ic(name));
+    });
+  }
+  // Кнопки появляются и меняют подпись в разных местах — значки расставляем
+  // автоматически при любом изменении экрана.
+  new MutationObserver(decorate).observe(document.getElementById("app"), { childList: true, subtree: true });
 
   // ---------- вспомогательное ----------
 
@@ -273,21 +345,21 @@
 
   views.home = function () {
     var tiles = "";
-    if (can("scan")) tiles += '<button class="tile primary" data-go="scan"><span class="icon">📷</span><div><b>Сканировать</b><br><span>Проверка билетов на входе</span></div></button>';
-    if (can("new")) tiles += tile("new", "🎟", "Новый билет", "Выдать билет клиенту");
-    tiles += tile("list", "📋", "Список и поиск", me.scoped ? "Билеты, выданные вами" : "Все билеты");
-    if (can("stats")) tiles += tile("stats", "📊", "Статистика", "Сколько выдано и прошло");
-    if (can("admins")) tiles += tile("admins", "👥", "Админы", "Доступ и разрешения");
-    if (can("design")) tiles += tile("design", "🎨", "Дизайн билета", "Шаблон и место QR");
-    if (can("reset")) tiles += tile("reset", "🗑", "Сброс списка", "Удалить все билеты", "danger");
-    if (me.is_main) tiles += tile("settings", "⚙️", "Настройки", "Ключ ИИ и адрес сканера");
+    if (can("scan")) tiles += tile("scan", "scan", "Сканировать", "Проверка билетов на входе", "primary wide");
+    if (can("new")) tiles += tile("new", "ticket", "Новый билет", "Выдать билет клиенту");
+    tiles += tile("list", "list", "Список и поиск", me.scoped ? "Билеты, выданные вами" : "Все билеты");
+    if (can("stats")) tiles += tile("stats", "stats", "Статистика", "Сколько выдано и прошло");
+    if (can("admins")) tiles += tile("admins", "admins", "Админы", "Доступ и разрешения");
+    if (can("design")) tiles += tile("design", "design", "Дизайн билета", "Шаблон и место QR");
+    if (me.is_main) tiles += tile("settings", "settings", "Настройки", "Ключ ИИ и адрес сканера");
+    if (can("reset")) tiles += tile("reset", "trash", "Сброс списка", "Удалить все билеты", "danger");
     app.innerHTML = header(me.is_main ? "Главный администратор" : "Администратор", "Здравствуйте, " + me.name) +
       '<div class="tiles">' + tiles + "</div>";
     on("[data-go]", "click", function () { go(this.dataset.go); });
   };
   function tile(name, icon, title, text, extra) {
-    return '<button class="tile ' + (extra || "") + '" data-go="' + name + '"><span class="icon">' + icon +
-      "</span><div><b>" + title + "</b><br><span>" + text + "</span></div></button>";
+    return '<button class="tile ' + (extra || "") + '" data-go="' + name + '"><span class="badge">' + ic(icon) +
+      "</span><span><b>" + title + "</b><small>" + text + "</small></span></button>";
   }
 
   // ---------- новый билет ----------
@@ -301,8 +373,8 @@
       field("university", "Университет", "text", "") +
       field("phone", "Телефон", "tel", "+7 707 123 45 67") +
       '<label class="field"><span>Количество билетов на эти данные</span>' +
-      '<div class="stepper"><button type="button" id="minus" aria-label="Меньше">−</button>' +
-      '<output id="count">1</output><button type="button" id="plus" aria-label="Больше">+</button></div></label>' +
+      '<div class="stepper"><button type="button" id="minus" aria-label="Меньше">' + ic("minus") + "</button>" +
+      '<output id="count">1</output><button type="button" id="plus" aria-label="Больше">' + ic("plus") + "</button></div></label>" +
       '<button class="btn primary" id="submit" type="submit">Выдать билет</button></form>';
     function setCount(n) {
       count = Math.max(1, Math.min(me.max_tickets, n));
@@ -380,7 +452,7 @@
         : '<div class="card warn"><p class="verdict">Камера доступна только на телефоне</p><p class="muted">Здесь можно проверить билет по номеру.</p></div>') +
       "<h2>Или по номеру</h2>" +
       '<form class="row" id="manual"><input id="number" type="text" inputmode="numeric" autocomplete="off" placeholder="Номер билета, например 12">' +
-      '<button class="btn fit" type="submit">Проверить</button></form>';
+      '<button class="btn fit" type="submit" data-icon="check">Проверить</button></form>';
 
     function show(result) {
       var t = result.ticket, html;
@@ -451,7 +523,7 @@
         $("#items").innerHTML = data.tickets.map(function (t) {
           return '<button class="item" data-id="' + t.id + '"><div class="main"><b><span class="code">' + esc(t.code) + "</span> " +
             esc(t.full_name) + "</b><span>" + esc(t.group) + " · " + esc(t.university) + " · " + esc(t.phone) + "</span></div>" +
-            chip(t) + "</button>";
+            chip(t) + ic("chevron") + "</button>";
         }).join("") || '<p class="loading">' + (query ? "Ничего не найдено" : "Билетов пока нет") + "</p>";
         on(".item", "click", function () {
           var id = Number(this.dataset.id);
@@ -526,11 +598,11 @@
       '<div class="list">' + (data.admins.map(function (a) {
         return '<button class="item" data-id="' + a.id + '"><div class="main"><b>' + esc(a.label) + "</b><span>" +
           (a.user_id ? "Разделов: " + a.perms.length : "ещё не заходил в бота") + (a.is_self ? " · это вы" : "") +
-          "</span></div><span class=\"muted\">›</span></button>";
+          "</span></div>" + ic("chevron") + "</button>";
       }).join("") || '<p class="muted center">Других админов пока нет.</p>') + "</div>" +
       "<h2>Добавить админа</h2>" +
       '<form class="row" id="add"><input id="value" type="text" autocomplete="off" autocapitalize="off" placeholder="@username или Telegram ID">' +
-      '<button class="btn fit" type="submit">Добавить</button></form>' +
+      '<button class="btn fit" type="submit" data-icon="plus">Добавить</button></form>' +
       '<p class="muted small" style="margin-top:12px">Новый админ получает «Новый билет» и «Сканировать». Добавленный по нику получит доступ, когда напишет боту /start.</p>' +
       '<p class="muted small">Главные администраторы (из настроек): ' + data.main_ids.join(", ") + "</p>";
     on(".item", "click", function () { go("admin", { id: Number(this.dataset.id), data: data }); });
@@ -625,7 +697,7 @@
       '<label class="field"><span>Размер QR: <b id="sizeLabel"></b></span><input type="range" id="size" min="40" max="' +
       Math.min(p.width, p.height) + '" step="2"></label>' +
       '<form class="row" id="hintForm" style="margin-bottom:16px"><input id="hint" type="text" autocomplete="off" placeholder="Подсказка ИИ: «в жёлтой части справа»">' +
-      '<button class="btn fit" type="submit">Ещё раз</button></form>' +
+      '<button class="btn fit" type="submit" data-icon="refresh">Ещё раз</button></form>' +
       '<button class="btn primary" id="save">Сохранить дизайн</button><button class="btn" id="cancel">Отмена</button>';
     var img = $("#preview"), size = $("#size"), seq = 0;
     function refresh() {
@@ -684,12 +756,12 @@
       app.innerHTML = header("Только для главного админа", "Настройки") +
         '<form id="groqForm"><label class="field"><span>Ключ Groq — ' + (data.groq_set ? "задан (" + esc(data.groq_hint) + ")" : "не задан") +
         '</span><input id="groq" type="text" autocomplete="off" autocapitalize="off" placeholder="gsk_…"></label>' +
-        '<div class="row"><button class="btn primary" type="submit">Сохранить ключ</button>' +
+        '<div class="row"><button class="btn primary" type="submit" data-icon="check">Сохранить ключ</button>' +
         (data.groq_set ? '<button class="btn fit danger" type="button" id="groqDel">Удалить</button>' : "") + "</div></form>" +
         '<p class="muted small" style="margin-top:10px">Нужен для смены дизайна билета: ИИ находит место под QR-код. Бесплатный ключ — на console.groq.com/keys</p>' +
         '<form id="scannerForm" style="margin-top:22px"><label class="field"><span>Адрес страницы-сканера</span>' +
         '<input id="scanner" type="text" inputmode="url" autocomplete="off" autocapitalize="off" placeholder="https://логин.github.io/репозиторий/" value="' + esc(data.scanner_url) + '"></label>' +
-        '<button class="btn primary" type="submit">Сохранить адрес</button></form>' +
+        '<button class="btn primary" type="submit" data-icon="check">Сохранить адрес</button></form>' +
         '<p class="muted small" style="margin-top:10px">С этим адресом кнопка «Сканировать» на клавиатуре бота сразу открывает камеру. Оставьте поле пустым, чтобы убрать адрес. Сканер в этом приложении работает и без него.</p>';
       function save(button, body, message) {
         run(button, function () {
