@@ -11,10 +11,12 @@ from aiogram.types import BotCommand
 
 from .config import Config, load_config
 from .db import Database
+from . import ui
 from .handlers import fallback, owner, tickets
 
 
 def build_dispatcher(db: Database, config: Config, bot_username: str) -> Dispatcher:
+    ui.scanner_url = config.scanner_url
     dp = Dispatcher(db=db, config=config, bot_username=bot_username)
     # Бот работает только в личных сообщениях
     dp.message.filter(F.chat.type == "private")

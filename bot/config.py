@@ -23,6 +23,7 @@ class Config:
     tz: ZoneInfo
     data_dir: Path
     ticket_prefix: str
+    scanner_url: str = ""
 
     @property
     def db_path(self) -> Path:
@@ -58,6 +59,10 @@ def load_config() -> Config:
     data_dir = Path(os.getenv("DATA_DIR", "") or BASE_DIR / "data")
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    scanner_url = os.getenv("SCANNER_URL", "").strip()
+    if scanner_url and not scanner_url.startswith("https://"):
+        raise SystemExit("SCANNER_URL должен начинаться с https://")
+
     return Config(
         bot_token=token,
         main_admin_ids=main_ids,
@@ -67,4 +72,5 @@ def load_config() -> Config:
         tz=ZoneInfo(os.getenv("TIMEZONE", "").strip() or "Asia/Almaty"),
         data_dir=data_dir,
         ticket_prefix=os.getenv("TICKET_PREFIX", "").strip() or "MV",
+        scanner_url=scanner_url,
     )

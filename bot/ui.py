@@ -11,6 +11,7 @@ from aiogram.types import (
     KeyboardButton,
     KeyboardButtonRequestUsers,
     ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 
 from .config import Config
@@ -35,9 +36,17 @@ MENU_TEXTS = {
 PLAIN_TEXT = F.text & ~F.text.in_(MENU_TEXTS) & ~F.text.startswith("/")
 
 
+# Адрес страницы-сканера (мини-приложение Telegram). Задаётся при запуске из
+# настроек; если пуст — кнопка «Сканировать» работает как обычная текстовая.
+scanner_url = ""
+
+
 def main_menu(is_main: bool) -> ReplyKeyboardMarkup:
+    scan = KeyboardButton(
+        text=BTN_SCAN, web_app=WebAppInfo(url=scanner_url) if scanner_url else None
+    )
     rows = [
-        [KeyboardButton(text=BTN_NEW), KeyboardButton(text=BTN_SCAN)],
+        [KeyboardButton(text=BTN_NEW), scan],
         [KeyboardButton(text=BTN_LIST), KeyboardButton(text=BTN_SEARCH)],
         [KeyboardButton(text=BTN_STATS)],
     ]

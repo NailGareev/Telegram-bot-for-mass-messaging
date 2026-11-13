@@ -259,6 +259,23 @@ async def scan_token(message: Message, token: str, db: Database, config: Config)
     await message.answer(do_scan(t, db, config, message.from_user.full_name))
 
 
+@router.message(F.web_app_data)
+async def scan_from_camera(message: Message, state: FSMContext, db: Database, config: Config):
+    """Результат из мини-приложения со сканером: текст QR или «#номер билета»."""
+    await state.clear()
+    data = message.web_app_data.data
+    token = extract_token(data)
+    if token:
+        return await scan_token(message, token, db, config)
+    m = re.fullmatch(r"#(\d{1,9})", data.strip())
+    if not m:
+        return await message.answer("❌ Это QR-код не от нашего билета.")
+    t = db.get_ticket(int(m.group(1)))
+    if not t:
+        return await message.answer("❌ Билет с таким номером не найден.")
+    await message.answer(do_scan(t, db, config, message.from_user.full_name))
+
+
 @router.message(F.text == BTN_SCAN)
 async def scan_start(message: Message, state: FSMContext):
     await state.clear()

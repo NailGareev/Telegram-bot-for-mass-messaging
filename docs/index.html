@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Сканер билетов</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  body {
+    margin: 0; padding: 24px 16px; text-align: center;
+    font: 16px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--tg-theme-bg-color, #fff);
+    color: var(--tg-theme-text-color, #111);
+  }
+  p { margin: 0 0 20px; }
+  .hint { color: var(--tg-theme-hint-color, #888); font-size: 14px; }
+  button, input {
+    box-sizing: border-box; width: 100%; padding: 14px; margin: 0 0 12px;
+    font: inherit; border-radius: 10px;
+  }
+  button {
+    border: 0; cursor: pointer; font-weight: 600;
+    background: var(--tg-theme-button-color, #2481cc);
+    color: var(--tg-theme-button-text-color, #fff);
+  }
+  button.secondary {
+    background: var(--tg-theme-secondary-bg-color, #eee);
+    color: var(--tg-theme-text-color, #111);
+  }
+  input {
+    border: 1px solid var(--tg-theme-hint-color, #bbb); text-align: center;
+    background: var(--tg-theme-bg-color, #fff); color: inherit;
+  }
+  hr { border: 0; border-top: 1px solid var(--tg-theme-secondary-bg-color, #ddd); margin: 12px 0 24px; }
+</style>
+</head>
+<body>
+  <p id="status">Открываю камеру…</p>
+  <button id="scan" hidden>📷 Сканировать QR</button>
+  <hr>
+  <p class="hint">Если QR не читается — введите номер билета</p>
+  <input id="number" inputmode="numeric" placeholder="Номер билета, например 12">
+  <button id="send" class="secondary">Проверить по номеру</button>
+
+<script>
+  var tg = window.Telegram && window.Telegram.WebApp;
+  var statusEl = document.getElementById("status");
+  var scanBtn = document.getElementById("scan");
+
+  function send(text) {
+    // Бот получит текст, отметит билет и пришлёт данные клиента в чат
+    tg.sendData(text);
+  }
+
+  function scan() {
+    if (!tg || !tg.initData) {
+      statusEl.textContent = "Эта страница работает только внутри Telegram — откройте её кнопкой «Сканировать» в боте.";
+      return;
+    }
+    if (!tg.showScanQrPopup || !tg.isVersionAtLeast("6.4")) {
+      statusEl.textContent = "Сканер камерой доступен только в Telegram на телефоне. Здесь можно проверить билет по номеру.";
+      return;
+    }
+    statusEl.textContent = "Наведите камеру на QR-код билета";
+    try {
+      tg.showScanQrPopup({ text: "Наведите камеру на QR-код билета" }, function (text) {
+        if (!text) return false;
+        send(text);
+        return true; // закрыть сканер
+      });
+    } catch (e) {
+      statusEl.textContent = "Не удалось открыть камеру. Разрешите Telegram доступ к камере в настройках телефона.";
+      scanBtn.hidden = false;
+    }
+  }
+
+  if (tg) {
+    tg.ready();
+    tg.expand();
+    tg.onEvent("scanQrPopupClosed", function () {
+      statusEl.textContent = "Сканер закрыт.";
+      scanBtn.hidden = false;
+    });
+  }
+  scanBtn.addEventListener("click", scan);
+  document.getElementById("send").addEventListener("click", function () {
+    var digits = document.getElementById("number").value.replace(/\D/g, "");
+    if (digits && tg && tg.initData) send("#" + digits);
+  });
+  scan();
+</script>
+</body>
+</html>
