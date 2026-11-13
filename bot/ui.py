@@ -36,6 +36,8 @@ PLAIN_TEXT = F.text & ~F.text.in_(MENU_TEXTS) & ~F.text.startswith("/")
 # Адрес страницы-сканера (мини-приложение Telegram). Задаётся при запуске из
 # настроек; если пуст — кнопка «Сканировать» работает как обычная текстовая.
 scanner_url = ""
+# Адрес мини-приложения (появляется после запуска веб-сервера и туннеля).
+miniapp_url = ""
 
 
 def main_menu(access: Access) -> ReplyKeyboardMarkup:

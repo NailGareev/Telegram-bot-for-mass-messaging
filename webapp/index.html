@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Билеты</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg-top: #4a2a22;
+    --bg-bottom: #2b1612;
+    --cream: #fdf3b8;
+    --gold: #e9c46a;
+    --text: #fbf1dc;
+    --muted: rgba(251, 241, 220, .62);
+    --card: rgba(255, 244, 214, .07);
+    --card-strong: rgba(255, 244, 214, .12);
+    --line: rgba(255, 244, 214, .16);
+    --ok: #8fd6a0;
+    --warn: #ffb37a;
+    --bad: #ff8f85;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { min-height: 100%; }
+  body {
+    margin: 0;
+    padding: 22px 16px calc(28px + env(safe-area-inset-bottom));
+    font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(120% 420px at 50% 0%, rgba(233, 196, 106, .16), transparent 60%),
+      linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+    background-attachment: fixed;
+    overflow-wrap: anywhere;
+  }
+  #app { max-width: 480px; margin: 0 auto; }
+  button, input { font: inherit; color: inherit; }
+
+  .eyebrow { margin: 0; font-size: 11px; letter-spacing: .3em; text-transform: uppercase; color: var(--gold); }
+  h1 { margin: 4px 0 18px; font: 500 28px/1.15 Georgia, "Times New Roman", serif; color: var(--cream); }
+  h2 { margin: 24px 0 10px; font-size: 12px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
+  p { margin: 0 0 12px; }
+  .muted { color: var(--muted); }
+  .small { font-size: 13px; }
+  .center { text-align: center; }
+
+  /* Главная */
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .tile {
+    display: flex; flex-direction: column; gap: 10px; align-items: flex-start;
+    min-height: 108px; padding: 16px; border: 0; border-radius: 20px; text-align: left;
+    background: var(--card); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer;
+    transition: transform .12s ease, background .12s ease;
+  }
+  .tile:active { transform: scale(.975); background: var(--card-strong); }
+  .tile .icon { font-size: 26px; line-height: 1; }
+  .tile b { font-weight: 600; font-size: 16px; }
+  .tile span { font-size: 13px; color: var(--muted); }
+  .tile.primary { grid-column: span 2; min-height: 0; flex-direction: row; align-items: center; gap: 14px;
+    color: #3a1f17; background: linear-gradient(180deg, #fff3b0, var(--gold)); box-shadow: 0 10px 26px rgba(233, 196, 106, .25); }
+  .tile.primary span { color: rgba(58, 31, 23, .7); }
+  .tile.danger b { color: var(--bad); }
+
+  /* Кнопки и поля */
+  .btn {
+    display: block; width: 100%; padding: 15px 18px; border: 0; border-radius: 16px;
+    font-weight: 600; font-size: 16px; text-align: center; cursor: pointer;
+    color: var(--cream); background: var(--card-strong); box-shadow: inset 0 0 0 1px var(--line);
+    transition: transform .12s ease, opacity .12s ease;
+  }
+  .btn:active { transform: scale(.985); }
+  .btn + .btn { margin-top: 10px; }
+  .btn.primary { color: #3a1f17; background: linear-gradient(180deg, #fff3b0, var(--gold)); box-shadow: 0 10px 26px rgba(233, 196, 106, .25); }
+  .btn.danger { color: var(--bad); }
+  .btn[disabled] { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 10px; }
+  .row > .btn { margin-top: 0; }
+  .row > .fit { width: auto; flex: none; padding-left: 20px; padding-right: 20px; }
+
+  label.field { display: block; margin-bottom: 12px; }
+  label.field > span { display: block; margin: 0 0 6px 4px; font-size: 13px; color: var(--muted); }
+  input[type=text], input[type=tel], input[type=search] {
+    width: 100%; height: 52px; padding: 0 16px; border: 0; border-radius: 16px; font-size: 16px;
+    background: var(--card); box-shadow: inset 0 0 0 1px var(--line); outline: none; min-width: 0;
+    transition: box-shadow .15s ease;
+  }
+  input::placeholder { color: var(--muted); }
+  input:focus { box-shadow: inset 0 0 0 1.5px var(--gold); }
+  input[type=range] { width: 100%; accent-color: var(--gold); }
+
+  .stepper { display: flex; align-items: center; gap: 12px; }
+  .stepper button { width: 52px; height: 52px; border: 0; border-radius: 16px; font-size: 24px; cursor: pointer;
+    background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+  .stepper output { flex: 1; text-align: center; font: 500 26px Georgia, serif; color: var(--cream); font-variant-numeric: tabular-nums; }
+
+  /* Карточки */
+  .card { padding: 16px; border-radius: 20px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); margin-bottom: 12px; }
+  .card.ok { box-shadow: inset 0 0 0 1.5px var(--ok); }
+  .card.warn { box-shadow: inset 0 0 0 1.5px var(--warn); }
+  .card.bad { box-shadow: inset 0 0 0 1.5px var(--bad); }
+  .verdict { margin: 0 0 4px; font-weight: 700; font-size: 19px; }
+  .ok .verdict { color: var(--ok); } .warn .verdict { color: var(--warn); } .bad .verdict { color: var(--bad); }
+  dl { margin: 12px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; }
+  dt { color: var(--muted); font-size: 14px; }
+  dd { margin: 0; }
+  .code { font-variant-numeric: tabular-nums; color: var(--gold); font-weight: 600; letter-spacing: .02em; }
+
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 13px 14px; border: 0; border-radius: 16px;
+    text-align: left; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); cursor: pointer; }
+  .item:active { background: var(--card-strong); }
+  .item .main { flex: 1; min-width: 0; }
+  .item .main b { display: block; font-weight: 600; }
+  .item .main span { display: block; font-size: 13px; color: var(--muted); }
+  .chip { flex: none; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .chip.ok { color: #173d22; background: var(--ok); }
+  .chip.wait { color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); }
+  .chip.warn { color: #4a2408; background: var(--warn); }
+
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .stat { padding: 16px; border-radius: 20px; background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+  .stat b { display: block; font: 500 32px/1.1 Georgia, serif; color: var(--cream); font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 13px; color: var(--muted); }
+  .rank { display: flex; justify-content: space-between; gap: 12px; padding: 10px 2px; border-bottom: 1px solid var(--line); }
+  .rank:last-child { border-bottom: 0; }
+  .rank b { font-variant-numeric: tabular-nums; color: var(--gold); }
+
+  .switch { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 14px 4px;
+    border: 0; border-bottom: 1px solid var(--line); background: none; text-align: left; cursor: pointer; }
+  .switch:last-of-type { border-bottom: 0; }
+  .switch i { flex: none; position: relative; width: 46px; height: 28px; border-radius: 999px; background: rgba(255, 244, 214, .18); transition: background .15s ease; }
+  .switch i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--text); transition: transform .15s ease; }
+  .switch[aria-checked=true] i { background: var(--gold); }
+  .switch[aria-checked=true] i::after { transform: translateX(18px); background: #3a1f17; }
+  .switch[disabled] { opacity: .45; cursor: default; }
+
+  /* Сканер */
+  .finder { position: relative; display: block; width: min(60vw, 230px); aspect-ratio: 1; margin: 8px auto 18px; padding: 0; border: 0;
+    border-radius: 28px; background: var(--card); box-shadow: 0 0 0 1px var(--line), 0 24px 60px rgba(0, 0, 0, .35); cursor: pointer; overflow: hidden; }
+  .finder svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .finder .beam { position: absolute; left: 14%; right: 14%; top: 16%; height: 2px; border-radius: 2px; background: var(--gold);
+    box-shadow: 0 0 18px 4px rgba(233, 196, 106, .28); animation: sweep 2.4s ease-in-out infinite; }
+  @keyframes sweep { 0%, 100% { transform: translateY(0); opacity: .35; } 50% { transform: translateY(min(40vw, 154px)); opacity: 1; } }
+
+  .preview { display: block; width: 100%; border-radius: 14px; box-shadow: 0 0 0 1px var(--line); background: var(--card); min-height: 60px; }
+  .preview.pick { cursor: crosshair; touch-action: manipulation; }
+
+  #toast { position: fixed; left: 16px; right: 16px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 10;
+    max-width: 448px; margin: 0 auto; padding: 13px 16px; border-radius: 14px; text-align: center; font-weight: 500;
+    color: #2b1612; background: var(--cream); box-shadow: 0 12px 30px rgba(0, 0, 0, .4);
+    opacity: 0; transform: translateY(12px); pointer-events: none; transition: opacity .2s ease, transform .2s ease; }
+  #toast.show { opacity: 1; transform: none; }
+  #toast.error { color: #fff; background: #a8392f; }
+
+  .loading { padding: 48px 0; text-align: center; color: var(--muted); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+    .finder .beam { animation: none; top: 50%; opacity: .8; }
+  }
+</style>
+</head>
+<body>
+<div id="app"><p class="loading">Загрузка…</p></div>
+<div id="toast" role="status"></div>
+
+<script>
+(function () {
+  "use strict";
+  var tg = (window.Telegram && window.Telegram.WebApp) || {};
+  var app = document.getElementById("app");
+  var me = null;
+  var stack = [];
+
+  // ---------- вспомогательное ----------
+
+  function esc(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function $(selector) { return app.querySelector(selector); }
+  function on(selector, event, handler) {
+    Array.prototype.forEach.call(app.querySelectorAll(selector), function (el) {
+      el.addEventListener(event, handler);
+    });
+  }
+  function haptic(type) {
+    try { tg.HapticFeedback.notificationOccurred(type); } catch (e) {}
+  }
+
+  var toastTimer;
+  function toast(text, isError) {
+    var el = document.getElementById("toast");
+    el.textContent = text;
+    el.className = "show" + (isError ? " error" : "");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.className = ""; }, isError ? 4500 : 2600);
+    if (isError) haptic("error");
+  }
+
+  function confirmBox(text) {
+    return new Promise(function (resolve) {
+      if (tg.showConfirm && tg.isVersionAtLeast && tg.isVersionAtLeast("6.2")) tg.showConfirm(text, resolve);
+      else resolve(window.confirm(text));
+    });
+  }
+
+  function request(path, options) {
+    options.headers = Object.assign({ "X-Init-Data": tg.initData || "" }, options.headers);
+    options.method = "POST";
+    return fetch("api/" + path, options).catch(function () {
+      throw new Error("Нет связи с ботом. Проверьте, что он запущен.");
+    });
+  }
+  function api(path, body) {
+    return request(path, {
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok) throw new Error(data.error || "Ошибка " + response.status);
+        return data;
+      });
+    });
+  }
+  function apiImage(path, body) {
+    return request(path, {
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
+    }).then(function (response) {
+      if (!response.ok) throw new Error("Не удалось загрузить картинку");
+      return response.blob();
+    }).then(function (blob) { return URL.createObjectURL(blob); });
+  }
+
+  // Выполняет действие по кнопке: блокирует её на время запроса и показывает ошибки.
+  function run(button, action) {
+    if (button && button.disabled) return;
+    if (button) button.disabled = true;
+    return Promise.resolve().then(action).catch(function (error) {
+      toast(error.message || "Что-то пошло не так", true);
+    }).then(function () { if (button) button.disabled = false; });
+  }
+
+  // ---------- навигация ----------
+
+  var views = {};
+  function render() {
+    var top = stack[stack.length - 1];
+    window.scrollTo(0, 0);
+    try {
+      if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide();
+    } catch (e) {}
+    views[top.name](top.params);
+  }
+  function go(name, params) { stack.push({ name: name, params: params || {} }); render(); }
+  function back() { if (stack.length > 1) { stack.pop(); render(); } }
+  function home() { stack = [{ name: "home", params: {} }]; render(); }
+  function header(eyebrow, title) {
+    return '<p class="eyebrow">' + esc(eyebrow) + "</p><h1>" + esc(title) + "</h1>";
+  }
+  function loading(eyebrow, title) {
+    app.innerHTML = header(eyebrow, title) + '<p class="loading">Загрузка…</p>';
+  }
+  function failed(error) {
+    app.insertAdjacentHTML("beforeend", '<div class="card bad"><p class="verdict">Не получилось</p><p>' +
+      esc(error.message) + "</p></div>");
+    var l = $(".loading"); if (l) l.remove();
+  }
+  function can(perm) { return me.perms.indexOf(perm) !== -1; }
+
+  // ---------- главная ----------
+
+  views.home = function () {
+    var tiles = "";
+    if (can("scan")) tiles += '<button class="tile primary" data-go="scan"><span class="icon">📷</span><div><b>Сканировать</b><br><span>Проверка билетов на входе</span></div></button>';
+    if (can("new")) tiles += tile("new", "🎟", "Новый билет", "Выдать билет клиенту");
+    tiles += tile("list", "📋", "Список и поиск", me.scoped ? "Билеты, выданные вами" : "Все билеты");
+    if (can("stats")) tiles += tile("stats", "📊", "Статистика", "Сколько выдано и прошло");
+    if (can("admins")) tiles += tile("admins", "👥", "Админы", "Доступ и разрешения");
+    if (can("design")) tiles += tile("design", "🎨", "Дизайн билета", "Шаблон и место QR");
+    if (can("reset")) tiles += tile("reset", "🗑", "Сброс списка", "Удалить все билеты", "danger");
+    app.innerHTML = header(me.is_main ? "Главный администратор" : "Администратор", "Здравствуйте, " + me.name) +
+      '<div class="tiles">' + tiles + "</div>";
+    on("[data-go]", "click", function () { go(this.dataset.go); });
+  };
+  function tile(name, icon, title, text, extra) {
+    return '<button class="tile ' + (extra || "") + '" data-go="' + name + '"><span class="icon">' + icon +
+      "</span><div><b>" + title + "</b><br><span>" + text + "</span></div></button>";
+  }
+
+  // ---------- новый билет ----------
+
+  views.new = function (params) {
+    var count = 1;
+    app.innerHTML = header("Новый билет", "Данные клиента") +
+      '<form id="form">' +
+      field("full_name", "Фамилия и имя", "text", "Иванов Иван") +
+      field("group", "Группа", "text", "ИС-21") +
+      field("university", "Университет", "text", "") +
+      field("phone", "Телефон", "tel", "+7 707 123 45 67") +
+      '<label class="field"><span>Количество билетов на эти данные</span>' +
+      '<div class="stepper"><button type="button" id="minus" aria-label="Меньше">−</button>' +
+      '<output id="count">1</output><button type="button" id="plus" aria-label="Больше">+</button></div></label>' +
+      '<button class="btn primary" id="submit" type="submit">Выдать билет</button></form>';
+    function setCount(n) {
+      count = Math.max(1, Math.min(me.max_tickets, n));
+      $("#count").textContent = count;
+      $("#submit").textContent = count === 1 ? "Выдать билет" : "Выдать билеты: " + count + " шт.";
+    }
+    $("#minus").addEventListener("click", function () { setCount(count - 1); });
+    $("#plus").addEventListener("click", function () { setCount(count + 1); });
+    $("#form").addEventListener("submit", function (event) {
+      event.preventDefault();
+      var data = { count: count };
+      ["full_name", "group", "university", "phone"].forEach(function (key) { data[key] = $("#" + key).value; });
+      run($("#submit"), function send() {
+        return api("tickets/create", data).then(function (result) {
+          if (result.duplicate) {
+            var who = result.duplicate.map(function (d) { return d.code + " — " + d.full_name; }).join("\n");
+            return confirmBox("На этот номер уже выдан билет:\n" + who + "\n\nВыдать ещё?").then(function (yes) {
+              if (yes) { data.force = true; return send(); }
+            });
+          }
+          haptic("success");
+          stack.pop();
+          go("issued", result);
+        });
+      });
+    });
+  };
+  function field(id, label, type, placeholder) {
+    return '<label class="field"><span>' + label + '</span><input id="' + id + '" type="' + type +
+      '" maxlength="100" autocomplete="off" placeholder="' + esc(placeholder) + '" required></label>';
+  }
+
+  views.issued = function (result) {
+    var t = result.tickets[0];
+    app.innerHTML = header("Готово", result.tickets.length === 1 ? "Билет выдан" : "Билеты выданы: " + result.tickets.length) +
+      '<div class="card ok"><p class="verdict">' + result.tickets.map(function (x) { return esc(x.code); }).join(", ") + "</p>" +
+      details(t, false) + "</div>" +
+      '<p class="muted small center">' + (result.sent
+        ? "Файлы билетов с QR-кодами отправлены вам в чат с ботом."
+        : "Не удалось отправить файлы в чат. Откройте билет в «Списке» и нажмите «Прислать в чат».") + "</p>" +
+      '<button class="btn primary" id="again">Выдать ещё билет</button><button class="btn" id="home">На главную</button>';
+    $("#again").addEventListener("click", function () { stack.pop(); go("new"); });
+    $("#home").addEventListener("click", home);
+  };
+
+  function details(t, full) {
+    var html = "<dl><dt>ФИ</dt><dd>" + esc(t.full_name) + "</dd><dt>Группа</dt><dd>" + esc(t.group) +
+      "</dd><dt>Универ</dt><dd>" + esc(t.university) + "</dd><dt>Телефон</dt><dd>" + esc(t.phone) + "</dd>";
+    if (full) {
+      html += "<dt>Выдан</dt><dd>" + esc(t.created_at) + " · " + esc(t.created_by) + "</dd><dt>Проход</dt><dd>" +
+        (t.scan_count ? esc(t.first_scan_at) + " · " + esc(t.first_scan_by || "—") +
+          (t.scan_count > 1 ? " (сканирований: " + t.scan_count + ")" : "") : "ещё не сканировался") + "</dd>";
+    }
+    return html + "</dl>";
+  }
+
+  // ---------- сканирование ----------
+
+  var FINDER = '<button class="finder" id="finder" type="button" aria-label="Сканировать QR-код">' +
+    '<svg viewBox="0 0 100 100" fill="none" aria-hidden="true"><g stroke="#e9c46a" stroke-width="2.6" stroke-linecap="round">' +
+    '<path d="M14 30V22a8 8 0 0 1 8-8h8"/><path d="M70 14h8a8 8 0 0 1 8 8v8"/><path d="M86 70v8a8 8 0 0 1-8 8h-8"/><path d="M30 86h-8a8 8 0 0 1-8-8v-8"/></g>' +
+    '<g fill="#fdf3b8" opacity=".2"><path fill-rule="evenodd" d="M30 30h14v14H30zM34 34v6h6v-6zM56 30h14v14H56zM60 34v6h6v-6zM30 56h14v14H30zM34 60v6h6v-6z"/>' +
+    '<path d="M48 30h4v4h-4zM48 38h4v8h-4zM30 48h6v4h-6zM40 48h4v4h-4zM48 50h6v4h-6zM58 48h4v4h-4zM66 48h4v6h-4zM56 56h6v6h-6zM66 58h4v4h-4zM48 58h4v6h-4zM56 66h4v4h-4zM62 64h8v6h-8zM48 66h4v4h-4z"/></g></svg>' +
+    '<span class="beam"></span></button>';
+
+  function canScanQr() {
+    return typeof tg.showScanQrPopup === "function" && tg.isVersionAtLeast && tg.isVersionAtLeast("6.4") &&
+      tg.platform && tg.platform !== "unknown";
+  }
+
+  views.scan = function (params) {
+    var supported = canScanQr();
+    app.innerHTML = header("Check-in", "Сканер билетов") + '<div id="result"></div>' +
+      (supported ? FINDER + '<button class="btn primary" id="scan">Сканировать QR-код</button>'
+        : '<div class="card warn"><p class="verdict">Камера доступна только на телефоне</p><p class="muted">Здесь можно проверить билет по номеру.</p></div>') +
+      "<h2>Или по номеру</h2>" +
+      '<form class="row" id="manual"><input id="number" type="text" inputmode="numeric" autocomplete="off" placeholder="Номер билета, например 12">' +
+      '<button class="btn fit" type="submit">Проверить</button></form>';
+
+    function show(result) {
+      var t = result.ticket, html;
+      if (result.status === "ok") {
+        haptic("success");
+        html = '<div class="card ok"><p class="verdict">✓ Билет действителен</p><p class="muted">Первое сканирование · <span class="code">' +
+          esc(t.code) + "</span></p>" + details(t, false) + "</div>";
+      } else if (result.status === "repeat") {
+        haptic("warning");
+        html = '<div class="card warn"><p class="verdict">Повторное сканирование</p><p>Билет <span class="code">' + esc(t.code) +
+          "</span> сканируется уже " + t.scan_count + "-й раз.<br>Первое сканирование: <b>" + esc(t.first_scan_at) +
+          "</b> · " + esc(t.first_scan_by || "—") + "</p>" + details(t, false) + "</div>";
+      } else {
+        haptic("error");
+        html = '<div class="card bad"><p class="verdict">' + (result.status === "not_found" ? "Билет не найден" : "Это не наш билет") +
+          '</p><p class="muted">' + (result.status === "not_found"
+            ? "Такого билета нет в базе — возможно, он удалён или список был сброшен."
+            : "QR-код не относится к билетам этого бота.") + "</p></div>";
+      }
+      $("#result").innerHTML = html;
+      var button = $("#scan");
+      if (button) button.textContent = "Сканировать следующий";
+      window.scrollTo(0, 0);
+    }
+    function check(data) {
+      return api("scan", { data: data }).then(show).catch(function (error) { toast(error.message, true); });
+    }
+    function open() {
+      if (!supported) return;
+      try {
+        tg.showScanQrPopup({ text: "Наведите камеру на QR-код билета" }, function (text) {
+          if (!text) return false;
+          check(text);
+          return true;
+        });
+      } catch (e) {
+        toast("Камера не открылась. Разрешите Telegram доступ к камере.", true);
+      }
+    }
+    on("#scan, #finder", "click", open);
+    $("#manual").addEventListener("submit", function (event) {
+      event.preventDefault();
+      var digits = $("#number").value.replace(/\D/g, "");
+      if (!digits) return;
+      $("#number").value = "";
+      $("#number").blur();
+      check("#" + digits);
+    });
+    if (supported && !params.opened) { params.opened = true; setTimeout(open, 250); }
+  };
+
+  // ---------- список и поиск ----------
+
+  views.list = function (params) {
+    app.innerHTML = header(me.scoped ? "Билеты, выданные вами" : "Все билеты", "Список") +
+      '<input id="query" type="search" placeholder="Фамилия, телефон, группа или номер" autocomplete="off">' +
+      '<p class="muted small" id="summary" style="margin:12px 4px"></p><div class="list" id="items"><p class="loading">Загрузка…</p></div>' +
+      '<div style="margin-top:16px"><button class="btn" id="export">Выгрузить список в TXT</button></div>';
+    var input = $("#query"), timer, seq = 0;
+    input.value = params.query || "";
+    function load() {
+      var mine = ++seq, query = input.value.trim();
+      params.query = query;
+      api("tickets/list", { query: query }).then(function (data) {
+        if (mine !== seq || !$("#items")) return;
+        $("#summary").textContent = (query ? "Найдено: " : "Билетов: ") + data.total + " · прошли: " + data.scanned +
+          (data.total > data.tickets.length ? " · показаны первые " + data.tickets.length : "");
+        $("#items").innerHTML = data.tickets.map(function (t) {
+          return '<button class="item" data-id="' + t.id + '"><div class="main"><b><span class="code">' + esc(t.code) + "</span> " +
+            esc(t.full_name) + "</b><span>" + esc(t.group) + " · " + esc(t.university) + " · " + esc(t.phone) + "</span></div>" +
+            chip(t) + "</button>";
+        }).join("") || '<p class="loading">' + (query ? "Ничего не найдено" : "Билетов пока нет") + "</p>";
+        on(".item", "click", function () {
+          var id = Number(this.dataset.id);
+          go("ticket", { ticket: data.tickets.filter(function (t) { return t.id === id; })[0] });
+        });
+      }).catch(function (error) { if ($("#items")) { $("#items").innerHTML = ""; failed(error); } });
+    }
+    input.addEventListener("input", function () { clearTimeout(timer); timer = setTimeout(load, 300); });
+    $("#export").addEventListener("click", function () {
+      run(this, function () {
+        return api("tickets/export").then(function () { toast("Файл отправлен вам в чат с ботом"); });
+      });
+    });
+    load();
+  };
+  function chip(t) {
+    if (!t.scan_count) return '<span class="chip wait">не пришёл</span>';
+    return t.scan_count > 1 ? '<span class="chip warn">×' + t.scan_count + "</span>" : '<span class="chip ok">прошёл</span>';
+  }
+
+  views.ticket = function (params) {
+    var t = params.ticket;
+    app.innerHTML = header("Билет", t.code) + '<div class="card">' + details(t, true) + "</div>" +
+      '<button class="btn primary" id="send">Прислать билет в чат</button>' +
+      (t.can_unscan ? '<button class="btn" id="unscan">Снять отметку о проходе</button>' : "") +
+      (t.can_delete ? '<button class="btn danger" id="delete">Удалить билет</button>' : "");
+    function act(button, action, done) {
+      run(button, function () {
+        return api("tickets/action", { id: t.id, action: action }).then(done);
+      });
+    }
+    $("#send").addEventListener("click", function () {
+      act(this, "send", function () { toast("Билет отправлен вам в чат с ботом"); });
+    });
+    on("#unscan", "click", function () {
+      act(this, "unscan", function (data) { params.ticket = data.ticket; toast("Отметка о проходе снята"); render(); });
+    });
+    on("#delete", "click", function () {
+      var button = this;
+      confirmBox("Удалить билет " + t.code + " (" + t.full_name + ")? Его QR-код перестанет работать.").then(function (yes) {
+        if (yes) act(button, "delete", function () { toast("Билет удалён"); back(); });
+      });
+    });
+  };
+
+  // ---------- статистика ----------
+
+  views.stats = function () {
+    loading("Все билеты", "Статистика");
+    api("stats").then(function (s) {
+      function rank(title, rows) {
+        return rows.length ? "<h2>" + title + '</h2><div class="card">' + rows.map(function (r) {
+          return '<div class="rank"><span>' + esc(r.name) + "</span><b>" + r.count + "</b></div>";
+        }).join("") + "</div>" : "";
+      }
+      app.innerHTML = header("Все билеты", "Статистика") + '<div class="stats">' +
+        stat(s.total, "выдано билетов") + stat(s.scanned, "прошли на вход") +
+        stat(s.waiting, "ещё не пришли") + stat(s.repeats, "с повторным сканированием") + "</div>" +
+        rank("По администраторам", s.by_admin) + rank("По университетам", s.by_university);
+    }).catch(failed);
+  };
+  function stat(value, label) { return '<div class="stat"><b>' + value + "</b><span>" + label + "</span></div>"; }
+
+  // ---------- администраторы ----------
+
+  views.admins = function () {
+    loading("Доступ", "Администраторы");
+    api("admins/list").then(showAdmins).catch(failed);
+  };
+  function showAdmins(data) {
+    app.innerHTML = header("Доступ", "Администраторы") +
+      '<div class="list">' + (data.admins.map(function (a) {
+        return '<button class="item" data-id="' + a.id + '"><div class="main"><b>' + esc(a.label) + "</b><span>" +
+          (a.user_id ? "Разделов: " + a.perms.length : "ещё не заходил в бота") + (a.is_self ? " · это вы" : "") +
+          "</span></div><span class=\"muted\">›</span></button>";
+      }).join("") || '<p class="muted center">Других админов пока нет.</p>') + "</div>" +
+      "<h2>Добавить админа</h2>" +
+      '<form class="row" id="add"><input id="value" type="text" autocomplete="off" autocapitalize="off" placeholder="@username или Telegram ID">' +
+      '<button class="btn fit" type="submit">Добавить</button></form>' +
+      '<p class="muted small" style="margin-top:12px">Новый админ получает «Новый билет» и «Сканировать». Добавленный по нику получит доступ, когда напишет боту /start.</p>' +
+      '<p class="muted small">Главные администраторы (из настроек): ' + data.main_ids.join(", ") + "</p>";
+    on(".item", "click", function () { go("admin", { id: Number(this.dataset.id), data: data }); });
+    $("#add").addEventListener("submit", function (event) {
+      event.preventDefault();
+      run(this.querySelector("button"), function () {
+        return api("admins/add", { value: $("#value").value }).then(function (result) {
+          toast("Админ добавлен");
+          go("admin", { id: result.added, data: result });
+        });
+      });
+    });
+  }
+
+  views.admin = function (params) {
+    var data = params.data;
+    var a = data.admins.filter(function (x) { return x.id === params.id; })[0];
+    if (!a) return back();
+    app.innerHTML = header("Разрешения", a.label) +
+      '<p class="muted small">' + (a.username ? "@" + esc(a.username) + " · " : "") +
+      (a.user_id ? "ID " + a.user_id : "ещё не заходил в бота — доступ включится после /start") + "</p>" +
+      (a.is_self ? '<div class="card warn"><p class="muted">Свои разрешения менять нельзя.</p></div>' : "") +
+      '<div class="card">' + data.all_perms.map(function (p) {
+        var enabled = a.perms.indexOf(p.key) !== -1;
+        return '<button class="switch" role="switch" aria-checked="' + enabled + '" data-perm="' + p.key + '"' +
+          (p.grantable && !a.is_self ? "" : " disabled") + "><span>" + esc(p.title) + "</span><i></i></button>";
+      }).join("") + "</div>" +
+      '<p class="muted small">Без «Список и поиск» админ видит только билеты, которые выдал сам. Выдать можно только те разрешения, что есть у вас.</p>' +
+      (a.is_self ? "" : '<button class="btn danger" id="remove">Убрать админа</button>');
+    on(".switch", "click", function () {
+      run(this, function () {
+        return api("admins/toggle", { id: a.id, perm: this.dataset.perm }).then(function (result) {
+          params.data = result; render();
+        });
+      }.bind(this));
+    });
+    on("#remove", "click", function () {
+      var button = this;
+      confirmBox("Убрать админа " + a.label + "? Он потеряет доступ к боту.").then(function (yes) {
+        if (!yes) return;
+        run(button, function () {
+          return api("admins/remove", { id: a.id }).then(function () { toast("Админ убран"); back(); });
+        });
+      });
+    });
+  };
+
+  // ---------- дизайн билета ----------
+
+  views.design = function (params) {
+    if (params.pending) return designEditor(params);
+    loading("Шаблон", "Дизайн билета");
+    Promise.all([api("design/state"), apiImage("design/image")]).then(function (r) {
+      var state = r[0];
+      app.innerHTML = header("Шаблон", "Дизайн билета") +
+        '<img class="preview" alt="Текущий дизайн билета" src="' + r[1] + '">' +
+        '<p class="muted small center" style="margin-top:10px">Сейчас используется ' + (state.custom ? "ваш" : "стандартный") +
+        " дизайн. QR показан для примера.</p>" +
+        '<input type="file" id="file" accept="image/png,image/jpeg,image/webp" hidden>' +
+        '<button class="btn primary" id="upload">Загрузить новый дизайн</button>' +
+        (state.custom ? '<button class="btn" id="default">Вернуть стандартный</button>' : "") +
+        '<p class="muted small" style="margin-top:14px">После загрузки ИИ найдёт место под QR-код, а вы проверите результат и при необходимости поправите его прямо на картинке.</p>';
+      $("#upload").addEventListener("click", function () { $("#file").click(); });
+      $("#file").addEventListener("change", function () {
+        var file = this.files[0];
+        if (!file) return;
+        var button = $("#upload");
+        button.textContent = "ИИ ищет место для QR…";
+        run(button, function () {
+          return request("design/upload", { body: file }).then(function (response) {
+            return response.json().then(function (data) {
+              if (!response.ok) throw new Error(data.error || "Не удалось загрузить");
+              params.pending = data; render();
+            });
+          });
+        }).then(function () { if ($("#upload")) $("#upload").textContent = "Загрузить новый дизайн"; });
+      });
+      on("#default", "click", function () {
+        run(this, function () {
+          return api("design/default").then(function () { toast("Возвращён стандартный дизайн"); render(); });
+        });
+      });
+    }).catch(failed);
+  };
+
+  function designEditor(params) {
+    var p = params.pending, box = p.box.slice();
+    app.innerHTML = header("Новый дизайн", "Место под QR") +
+      '<img class="preview pick" id="preview" alt="Предпросмотр билета">' +
+      '<p class="small" style="margin:10px 2px"><b>' + esc(p.source) + ".</b>" + (p.problem ? " " + esc(p.problem) : "") +
+      '<br><span class="muted">Нажмите на картинку, чтобы переставить QR в это место.</span></p>' +
+      '<label class="field"><span>Размер QR: <b id="sizeLabel"></b></span><input type="range" id="size" min="40" max="' +
+      Math.min(p.width, p.height) + '" step="2"></label>' +
+      '<form class="row" id="hintForm" style="margin-bottom:16px"><input id="hint" type="text" autocomplete="off" placeholder="Подсказка ИИ: «в жёлтой части справа»">' +
+      '<button class="btn fit" type="submit">Ещё раз</button></form>' +
+      '<button class="btn primary" id="save">Сохранить дизайн</button><button class="btn" id="cancel">Отмена</button>';
+    var img = $("#preview"), size = $("#size"), seq = 0;
+    function refresh() {
+      var mine = ++seq;
+      size.value = box[2];
+      $("#sizeLabel").textContent = Math.round(box[2]) + " px";
+      apiImage("design/image", { pending: true, box: box }).then(function (url) {
+        if (mine === seq && img.isConnected) img.src = url;
+      }).catch(function (error) { toast(error.message, true); });
+    }
+    function clamp() {
+      box[2] = Math.max(40, Math.min(box[2], p.width, p.height));
+      box[0] = Math.max(0, Math.min(box[0], p.width - box[2]));
+      box[1] = Math.max(0, Math.min(box[1], p.height - box[2]));
+    }
+    img.addEventListener("click", function (event) {
+      var rect = img.getBoundingClientRect();
+      box[0] = (event.clientX - rect.left) / rect.width * p.width - box[2] / 2;
+      box[1] = (event.clientY - rect.top) / rect.height * p.height - box[2] / 2;
+      clamp(); refresh();
+    });
+    size.addEventListener("input", function () { $("#sizeLabel").textContent = this.value + " px"; });
+    size.addEventListener("change", function () {
+      var cx = box[0] + box[2] / 2, cy = box[1] + box[2] / 2;
+      box[2] = Number(this.value); box[0] = cx - box[2] / 2; box[1] = cy - box[2] / 2;
+      clamp(); refresh();
+    });
+    $("#hintForm").addEventListener("submit", function (event) {
+      event.preventDefault();
+      run(this.querySelector("button"), function () {
+        return api("design/retry", { box: box, hint: $("#hint").value }).then(function (data) {
+          params.pending = data; render();
+        });
+      });
+    });
+    $("#save").addEventListener("click", function () {
+      run(this, function () {
+        return api("design/save", { box: box }).then(function () {
+          haptic("success"); toast("Новый дизайн сохранён"); params.pending = null; render();
+        });
+      });
+    });
+    $("#cancel").addEventListener("click", function () {
+      run(this, function () {
+        return api("design/cancel").then(function () { params.pending = null; render(); });
+      });
+    });
+    refresh();
+  }
+
+  // ---------- сброс ----------
+
+  views.reset = function () {
+    app.innerHTML = header("Опасная зона", "Сброс списка") +
+      '<div class="card bad"><p class="verdict">Будут удалены все билеты</p><p class="muted">Все выданные QR-коды перестанут работать, нумерация начнётся заново. ' +
+      "Перед удалением бот пришлёт вам в чат резервную копию списка в TXT.</p></div>" +
+      '<button class="btn danger" id="reset">Удалить все билеты</button>';
+    $("#reset").addEventListener("click", function () {
+      var button = this;
+      confirmBox("Точно удалить все билеты? Отменить это нельзя.").then(function (yes) {
+        if (!yes) return;
+        run(button, function () {
+          return api("reset").then(function (data) {
+            app.innerHTML = header("Готово", "Список сброшен") + '<div class="card ok"><p class="verdict">Удалено билетов: ' +
+              data.deleted + '</p><p class="muted">Резервная копия отправлена вам в чат с ботом.</p></div>' +
+              '<button class="btn" id="home">На главную</button>';
+            $("#home").addEventListener("click", home);
+          });
+        });
+      });
+    });
+  };
+
+  // ---------- запуск ----------
+
+  try {
+    tg.ready(); tg.expand();
+    tg.setHeaderColor("#4a2a22"); tg.setBackgroundColor("#2b1612");
+    tg.BackButton.onClick(back);
+  } catch (e) {}
+
+  api("me").then(function (data) { me = data; home(); }).catch(function (error) {
+    app.innerHTML = header("Билеты", "Нет доступа") + '<div class="card bad"><p>' + esc(error.message) + "</p></div>";
+  });
+})();
+</script>
+</body>
+</html>

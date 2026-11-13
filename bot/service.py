@@ -3,19 +3,84 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 from contextlib import suppress
 from html import escape
 from pathlib import Path
 
 from aiogram import BaseMiddleware, Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import (
+    BufferedInputFile, CallbackQuery, MenuButtonCommands, MenuButtonWebApp, Message,
+    WebAppInfo,
+)
+
+from . import ai, ui
 
 from .access import Access, resolve_access
 from .config import DEFAULT_BOX, DEFAULT_TEMPLATE, Config
 from .db import Database, Ticket
-from .imaging import Box, qr_payload, render_ticket
+from .imaging import Box, find_qr_boxes, qr_payload, render_ticket
 from .ui import client_block, export_txt, fmt_dt, main_menu, ticket_code
+
+
+log = logging.getLogger(__name__)
+
+PREVIEW_TOKEN = "PREVIEW_PREVIEW_"
+
+
+async def sync_menu_button(bot: Bot, user_id: int, admin: bool = True) -> None:
+    """Кнопка «Mini App» слева от поля ввода — только у администраторов."""
+    if admin and ui.miniapp_url:
+        button = MenuButtonWebApp(text="Mini App", web_app=WebAppInfo(url=ui.miniapp_url))
+    else:
+        button = MenuButtonCommands()
+    with suppress(TelegramAPIError):
+        await bot.set_chat_menu_button(chat_id=user_id, menu_button=button)
+
+
+def render_preview(path, box: Box, bot_username: str) -> bytes:
+    return render_ticket(path, box, qr_payload(bot_username, PREVIEW_TOKEN))
+
+
+async def locate_box(
+    config: Config, size: tuple[int, int],
+    previous: Box | None = None, hint: str | None = None,
+) -> tuple[Box | None, str, str]:
+    """Ищет место под QR на черновике дизайна: ИИ + поиск образца QR на картинке.
+    Возвращает (квадрат или None, откуда взят, текст проблемы)."""
+    path = config.pending_path
+    box, source, problem = None, "", ""
+    if config.groq_api_key:
+        try:
+            box = await ai.locate_qr(
+                path, config.groq_api_key, config.groq_model, size, previous, hint
+            )
+            source = "ИИ определил место под QR"
+        except ai.AIError as e:
+            log.warning("Groq: %s", e)
+            problem = f"ИИ не справился: {e}"
+    else:
+        problem = "Ключ GROQ_API_KEY не задан, ИИ отключён."
+
+    if previous is None:  # первая попытка: уточняем по образцу QR на самой картинке
+        detected = await asyncio.to_thread(find_qr_boxes, path)
+        if detected and box:
+            cx, cy = box[0] + box[2] / 2, box[1] + box[2] / 2
+            near = min(
+                detected,
+                key=lambda d: (d[0] + d[2] / 2 - cx) ** 2 + (d[1] + d[2] / 2 - cy) ** 2,
+            )
+            overlap = (
+                min(box[0] + box[2], near[0] + near[2]) > max(box[0], near[0])
+                and min(box[1] + box[2], near[1] + near[2]) > max(box[1], near[1])
+            )
+            if overlap:
+                box, source = near, "ИИ нашёл QR, положение уточнено по образцу"
+        elif detected:
+            box = max(detected, key=lambda d: d[2])
+            source = "На картинке найден образец QR-кода"
+    return box, source, problem
 
 
 class Screen:

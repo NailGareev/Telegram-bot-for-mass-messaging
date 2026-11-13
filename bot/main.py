@@ -9,19 +9,67 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
+from aiohttp import web
 
 from .config import BASE_DIR, Config, load_config
 from .db import Database
 from . import ui
 from .handlers import fallback, manage, tickets
-from .service import AccessMiddleware
+from .service import AccessMiddleware, sync_menu_button
+from .tunnel import Tunnel
+from .webapi import PAGE, WebApi
+
+log = logging.getLogger(__name__)
 
 
-def versioned(url: str) -> str:
-    """Добавляет к адресу сканера метку версии страницы. Telegram кэширует
-    страницы мини-приложений, и без метки после обновления docs/index.html
+class MiniApp:
+    """Веб-сервер мини-приложения и (если нет своего адреса) туннель к нему."""
+
+    def __init__(self) -> None:
+        self.runner: web.AppRunner | None = None
+        self.tunnel = Tunnel()
+
+    async def start(self, bot: Bot, db: Database, config: Config, bot_username: str) -> str:
+        """Возвращает публичный адрес приложения или пустую строку, если оно выключено."""
+        if not config.miniapp:
+            return ""
+        self.runner = web.AppRunner(WebApi(bot, db, config, bot_username).build())
+        await self.runner.setup()
+        try:
+            await web.TCPSite(self.runner, "127.0.0.1", config.webapp_port).start()
+        except OSError as e:
+            log.warning("Mini App выключен: порт %s занят (%s)", config.webapp_port, e)
+            return ""
+        base = config.webapp_url
+        if not base and config.tunnel:
+            base = await self.tunnel.start(config.webapp_port, config.data_dir)
+        if not base:
+            log.warning(
+                "Mini App выключен: нет публичного HTTPS-адреса. Задайте WEBAPP_URL "
+                "или положите cloudflared рядом с run.py (см. README)."
+            )
+            return ""
+        log.info("Mini App доступен по адресу %s", base)
+        return versioned(base + "/", PAGE)
+
+    async def stop(self) -> None:
+        await self.tunnel.stop()
+        if self.runner:
+            await self.runner.cleanup()
+
+
+async def refresh_menu_buttons(bot: Bot, db: Database, config: Config) -> None:
+    """Ставит (или убирает) кнопку Mini App всем администраторам: адрес туннеля
+    меняется при каждом запуске."""
+    ids = set(config.main_admin_ids) | {a["user_id"] for a in db.list_admins() if a["user_id"]}
+    for user_id in ids:
+        await sync_menu_button(bot, user_id)
+
+
+def versioned(url: str, page=BASE_DIR / "docs" / "index.html") -> str:
+    """Добавляет к адресу страницы метку её версии. Telegram кэширует
+    страницы мини-приложений, и без метки после обновления страницы
     админы ещё долго видели бы старую версию."""
-    page = BASE_DIR / "docs" / "index.html"
     if not url or not page.exists():
         return url
     version = hashlib.md5(page.read_bytes()).hexdigest()[:8]
@@ -56,10 +104,14 @@ async def run() -> None:
         ]
     )
     dp = build_dispatcher(db, config, me.username)
-    logging.info("Бот @%s запущен", me.username)
+    miniapp = MiniApp()
     try:
+        ui.miniapp_url = await miniapp.start(bot, db, config, me.username)
+        await refresh_menu_buttons(bot, db, config)
+        log.info("Бот @%s запущен", me.username)
         await dp.start_polling(bot)
     finally:
+        await miniapp.stop()
         db.close()
         await bot.session.close()
 
