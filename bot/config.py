@@ -30,6 +30,7 @@ class Config:
     webapp_url: str = ""
     webapp_port: int = 8080
     tunnel: bool = True
+    log_level: str = "WARNING"
 
     @property
     def db_path(self) -> Path:
@@ -80,7 +81,12 @@ def load_config() -> Config:
     def flag(name: str) -> bool:
         return os.getenv(name, "").strip().lower() not in {"off", "0", "no", "false"}
 
+    log_level = os.getenv("LOG_LEVEL", "").strip().upper() or "WARNING"
+    if log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise SystemExit("LOG_LEVEL: допустимы DEBUG, INFO, WARNING, ERROR")
+
     return Config(
+        log_level=log_level,
         miniapp=flag("MINI_APP"),
         webapp_url=webapp_url,
         webapp_port=webapp_port,

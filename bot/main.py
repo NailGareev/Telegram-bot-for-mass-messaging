@@ -21,6 +21,10 @@ from .webapi import PAGE, WebApi
 log = logging.getLogger(__name__)
 
 
+def verbose(config: Config) -> bool:
+    return logging.getLevelName(config.log_level) <= logging.INFO
+
+
 class MiniApp:
     """Веб-сервер мини-приложения и (если нет своего адреса) туннель к нему."""
 
@@ -32,7 +36,10 @@ class MiniApp:
         """Возвращает публичный адрес приложения или пустую строку, если оно выключено."""
         if not config.miniapp:
             return ""
-        self.runner = web.AppRunner(WebApi(bot, db, config, bot_username).build())
+        self.runner = web.AppRunner(
+            WebApi(bot, db, config, bot_username).build(),
+            access_log=logging.getLogger("aiohttp.access") if verbose(config) else None,
+        )
         await self.runner.setup()
         try:
             await web.TCPSite(self.runner, "127.0.0.1", config.webapp_port).start()
@@ -79,10 +86,12 @@ def build_dispatcher(db: Database, config: Config, bot_username: str) -> Dispatc
 
 
 async def run() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
     config = load_config()
+    # По умолчанию в консоль попадают только предупреждения и ошибки.
+    # Подробный журнал (каждое сообщение, запросы Mini App) — LOG_LEVEL=INFO в .env.
+    logging.basicConfig(
+        level=config.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
     db = Database(config.db_path)
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     me = await bot.get_me()

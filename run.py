@@ -66,7 +66,6 @@ def main() -> None:
         stop("Нужен Python 3.10 или новее.")
     prepare_env_file()
     prepare_venv()
-    print("Запускаю бота (остановить — Ctrl+C) ...")
     try:
         code = subprocess.run([str(PYTHON), "-m", "bot"], cwd=ROOT).returncode
     except KeyboardInterrupt:
