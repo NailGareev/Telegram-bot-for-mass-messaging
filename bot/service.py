@@ -66,7 +66,8 @@ async def locate_box(
     if key:
         try:
             box, name = await ai.locate_layout(
-                path, key, config.groq_model, size, previous, previous_name, hint
+                path, key, config.groq_model, size, previous, previous_name, hint,
+                explicit=db.get_setting("groq_vision_model"),
             )
             source = "ИИ определил место под QR и под ФИ" if name else "ИИ определил место под QR"
         except ai.AIError as e:

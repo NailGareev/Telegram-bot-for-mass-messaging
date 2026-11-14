@@ -93,7 +93,7 @@ def load_config() -> Config:
         main_admin_ids=main_ids,
         groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
         groq_model=os.getenv("GROQ_MODEL", "").strip()
-        or "meta-llama/llama-4-scout-17b-16e-instruct",
+        or "meta-llama/llama-4-maverick-17b-128e-instruct",
         groq_text_model=os.getenv("GROQ_TEXT_MODEL", "").strip() or "llama-3.3-70b-versatile",
         tz=ZoneInfo(os.getenv("TIMEZONE", "").strip() or "Asia/Almaty"),
         data_dir=data_dir,

@@ -264,7 +264,7 @@
     list: "list",
     submit: "ticket", again: "plus", home: "home", scan: "scan", "export": "download", send: "send",
     unscan: "undo", "delete": "trash", remove: "trash", upload: "upload", "default": "undo",
-    save: "check", cancel: "close", groqDel: "trash", reset: "trash", photo: "image",
+    aiCheck: "refresh", save: "check", cancel: "close", groqDel: "trash", reset: "trash", photo: "image",
     pick: "file", dismiss: "check", createImport: "ticket", other: "file"
   };
   function decorate() {
@@ -1030,6 +1030,13 @@
         '<div class="row"><button class="btn primary" type="submit" data-icon="check">Сохранить ключ</button>' +
         (data.groq_set ? '<button class="btn fit danger" type="button" id="groqDel">Удалить</button>' : "") + "</div></form>" +
         '<p class="muted small" style="margin-top:10px">Нужен для смены дизайна билета (ИИ находит место под QR-код и под ФИ) и для разбора списков при массовом заливе. Бесплатный ключ — на console.groq.com/keys</p>' +
+        '<h2>Модели ИИ</h2><p class="muted small">Обычно ничего менять не нужно: если модель по умолчанию недоступна (Groq иногда снимает их с поддержки), бот сам находит рабочую среди моделей вашего ключа и запоминает её. Поля ниже — чтобы выбрать модель вручную; пустое поле — автоматически.</p>' +
+        '<form id="modelForm"><label class="field"><span>Модель для картинок (дизайн билета)' + (data.vision_auto ? " — сейчас: " + esc(data.vision_auto) : "") +
+        '</span><input id="visionModel" type="text" autocomplete="off" autocapitalize="off" placeholder="' + esc(data.vision_default) + '" value="' + esc(data.vision_model) + '"></label>' +
+        '<label class="field"><span>Модель для текста (массовый залив)' + (data.text_auto ? " — сейчас: " + esc(data.text_auto) : "") +
+        '</span><input id="textModel" type="text" autocomplete="off" autocapitalize="off" placeholder="' + esc(data.text_default) + '" value="' + esc(data.text_model) + '"></label>' +
+        '<button class="btn" type="submit" data-icon="check">Сохранить модели</button></form>' +
+        '<button class="btn primary" id="aiCheck" style="margin-top:12px">Проверить ИИ</button><div id="aiResult" style="margin-top:12px"></div>' +
         '<h2>Обновление проекта</h2><div class="card"><p>Скачайте проект на GitHub (<b>Code → Download ZIP</b>) и пришлите этот zip-файл в чат с ботом — бот покажет, что изменится, и установит обновление.</p><p class="muted small" style="margin:0">Настройки, база билетов и ключи не затрагиваются.</p></div>';
       function save(button, body, message) {
         run(button, function () {
@@ -1042,6 +1049,27 @@
         save(this.querySelector("button"), { groq_api_key: $("#groq").value }, "Ключ сохранён");
       });
       on("#groqDel", "click", function () { save(this, { groq_api_key: "" }, "Ключ удалён"); });
+      $("#modelForm").addEventListener("submit", function (event) {
+        event.preventDefault();
+        save(this.querySelector("button"), { vision_model: $("#visionModel").value, text_model: $("#textModel").value }, "Модели сохранены");
+      });
+      $("#aiCheck").addEventListener("click", function () {
+        var out = $("#aiResult");
+        out.innerHTML = '<p class="muted small">Проверяю ключ и модели… это может занять до минуты.</p>';
+        run(this, function () {
+          return api("settings/check").then(function (r) {
+            function line(title, x) {
+              return '<p style="margin:0 0 8px"><b>' + title + ":</b> " + (x.ok ? '<span style="color:var(--ok)">работает</span> · ' + esc(x.model)
+                : '<span style="color:var(--bad)">не работает</span><br><span class="muted small">' + esc(x.error) + "</span>") + "</p>";
+            }
+            if (r.error) { out.innerHTML = '<div class="card bad"><p class="verdict">Ключ не подошёл</p><p class="muted">' + esc(r.error) + "</p></div>"; return; }
+            var good = r.text.ok && r.vision.ok;
+            out.innerHTML = '<div class="card ' + (good ? "ok" : "warn") + '">' + line("Текст", r.text) + line("Картинки", r.vision) +
+              '<p class="muted small" style="margin:8px 0 0">Моделей у ключа: ' + r.models.length + (r.models.length ? " — " + esc(r.models.join(", ")) : "") + "</p></div>";
+            if (good) haptic("success");
+          });
+        }).then(function () {});
+      });
     }).catch(failed);
   };
 

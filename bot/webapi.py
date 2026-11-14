@@ -91,6 +91,7 @@ class WebApi:
             "reset": self.reset,
             "settings/get": self.settings_get,
             "settings/set": self.settings_set,
+            "settings/check": self.settings_check,
         }
         for path, handler in post.items():
             app.router.add_post(f"/api/{path}", handler)
@@ -394,7 +395,10 @@ class WebApi:
                 records = None
                 if key:
                     try:
-                        records = await ai.extract_records(part, key, self.config.groq_text_model)
+                        records = await ai.extract_records(
+                            part, key, self.config.groq_text_model,
+                            explicit=self.db.get_setting("groq_text_model"),
+                        )
                         ai_parts += 1
                     except ai.AIError as e:
                         log.warning("Groq (импорт): %s", e)
@@ -761,6 +765,12 @@ class WebApi:
         return {
             "groq_set": bool(key),
             "groq_hint": mask(key) if key else "",
+            "vision_model": self.db.get_setting("groq_vision_model") or "",
+            "text_model": self.db.get_setting("groq_text_model") or "",
+            "vision_auto": ai.remembered("vision") or "",
+            "text_auto": ai.remembered("text") or "",
+            "vision_default": self.config.groq_model,
+            "text_default": self.config.groq_text_model,
         }
 
     @staticmethod
@@ -783,7 +793,30 @@ class WebApi:
                 self.db.set_setting("groq_api_key", key)
             else:
                 self.db.delete_setting("groq_api_key")
+        for field, kind in (("vision_model", "vision"), ("text_model", "text")):
+            if field in data:
+                model = str(data[field]).strip()
+                if model and not re.fullmatch(r"[A-Za-z0-9._/:\-]{2,120}", model):
+                    raise ApiError("Название модели: латинские буквы, цифры и символы . _ / : -")
+                if model:
+                    self.db.set_setting(f"groq_{field}", model)
+                else:
+                    self.db.delete_setting(f"groq_{field}")
+                ai.forget(kind)   # выбор вручную важнее найденного ранее
         return web.json_response(self.settings_payload())
+
+    async def settings_check(self, request: web.Request) -> web.Response:
+        """Кнопка «Проверить ИИ»: ключ, список моделей, ответ текстовой и картиночной модели."""
+        self.need_main(request)
+        key = groq_key(self.db, self.config)
+        if not key:
+            raise ApiError("Сначала задайте ключ Groq")
+        result = await ai.check(
+            key, self.config.groq_model, self.config.groq_text_model,
+            self.db.get_setting("groq_vision_model"), self.db.get_setting("groq_text_model"),
+        )
+        result["models"] = result["models"][:40]
+        return web.json_response(result)
 
     # ---------- сброс ----------
 
