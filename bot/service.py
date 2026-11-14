@@ -18,9 +18,9 @@ from aiogram.types import (
 from . import ai, ui
 
 from .access import PERMS, Access, parse_perms, resolve_access
-from .config import DEFAULT_BOX, DEFAULT_TEMPLATE, Config
+from .config import DEFAULT_BOX, DEFAULT_NAME, DEFAULT_TEMPLATE, Config
 from .db import Database, Ticket
-from .imaging import Box, find_qr_boxes, qr_payload, render_ticket
+from .imaging import SAMPLE_NAME, Box, find_qr_boxes, qr_payload, render_ticket
 from .events import Hub
 from .ui import can_delete, client_block, export_txt, fmt_dt, main_menu, ticket_code
 
@@ -71,30 +71,39 @@ async def sync_menu_button(bot: Bot, user_id: int, admin: bool = True) -> None:
         await bot.set_chat_menu_button(chat_id=user_id, menu_button=button)
 
 
-def render_preview(path, box: Box, bot_username: str) -> bytes:
-    return render_ticket(path, box, qr_payload(bot_username, PREVIEW_TOKEN))
+def render_preview(
+    path, box: Box, bot_username: str, name_layout: dict | None = None
+) -> bytes:
+    """Предпросмотр дизайна: QR и (если включено) пример ФИ."""
+    return render_ticket(
+        path, box, qr_payload(bot_username, PREVIEW_TOKEN), SAMPLE_NAME, name_layout
+    )
 
 
 async def locate_box(
     config: Config, db: Database, size: tuple[int, int],
     previous: Box | None = None, hint: str | None = None,
-) -> tuple[Box | None, str, str]:
-    """Ищет место под QR на черновике дизайна: ИИ + поиск образца QR на картинке.
-    Возвращает (квадрат или None, откуда взят, текст проблемы)."""
+    previous_name: dict | None = None,
+) -> tuple[Box | None, dict | None, str, str]:
+    """Ищет на черновике дизайна место под QR и место, где можно печатать ФИ:
+    ИИ + поиск образца QR на самой картинке.
+    Возвращает (квадрат под QR или None, раскладка ФИ или None, откуда взято, проблема)."""
     path = config.pending_path
-    box, source, problem = None, "", ""
+    box, name, source, problem = None, None, "", ""
     key = groq_key(db, config)
     if key:
         try:
-            box = await ai.locate_qr(path, key, config.groq_model, size, previous, hint)
-            source = "ИИ определил место под QR"
+            box, name = await ai.locate_layout(
+                path, key, config.groq_model, size, previous, previous_name, hint
+            )
+            source = "ИИ определил место под QR и под ФИ" if name else "ИИ определил место под QR"
         except ai.AIError as e:
             log.warning("Groq: %s", e)
             problem = f"ИИ не справился: {e}"
     else:
         problem = "Ключ Groq не задан (главный админ задаёт его в «Настройках»), ИИ отключён."
 
-    if previous is None:  # первая попытка: уточняем по образцу QR на самой картинке
+    if previous is None and previous_name is None:  # первая попытка: уточняем по образцу QR на картинке
         detected = await asyncio.to_thread(find_qr_boxes, path)
         if detected and box:
             cx, cy = box[0] + box[2] / 2, box[1] + box[2] / 2
@@ -111,7 +120,7 @@ async def locate_box(
         elif detected:
             box = max(detected, key=lambda d: d[2])
             source = "На картинке найден образец QR-кода"
-    return box, source, problem
+    return box, name, source, problem
 
 
 class Screen:
@@ -199,17 +208,20 @@ class AccessMiddleware(BaseMiddleware):
                     await event.delete()
 
 
-def current_template(db: Database, config: Config) -> tuple[Path, Box]:
+def current_template(db: Database, config: Config) -> tuple[Path, Box, dict | None]:
+    """Действующий дизайн: (файл шаблона, квадрат под QR, раскладка ФИ или None)."""
     box = db.get_setting("template_box")
     if box and config.template_path.exists():
-        return config.template_path, tuple(box)
-    return DEFAULT_TEMPLATE, DEFAULT_BOX
+        name = db.get_setting("template_name")
+        return config.template_path, tuple(box), name if name and name.get("enabled") else None
+    return DEFAULT_TEMPLATE, DEFAULT_BOX, DEFAULT_NAME
 
 
 async def ticket_png(t: Ticket, db: Database, config: Config, bot_username: str) -> bytes:
-    template, box = current_template(db, config)
+    template, box, name_layout = current_template(db, config)
     return await asyncio.to_thread(
-        render_ticket, template, box, qr_payload(bot_username, t["token"])
+        render_ticket, template, box, qr_payload(bot_username, t["token"]),
+        t["full_name"], name_layout,
     )
 
 

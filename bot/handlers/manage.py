@@ -17,7 +17,7 @@ from PIL import UnidentifiedImageError
 from ..access import DEFAULT_PERMS, PERMS, Access, IsMain, Perm, dump_perms, parse_perms
 from ..config import Config
 from ..db import Database
-from ..imaging import Box, clamp_box, image_size, save_template
+from ..imaging import Box, clamp_box, clamp_name_box, image_size, save_template
 from ..service import (
     Screen, current_template, download, export_file, groq_key, image_file_id,
     locate_box, render_preview, scanner_url, set_scanner_url, sync_menu_button,
@@ -372,8 +372,18 @@ REVIEW_KB = inline(
 FIX_KB = inline([("🔄 Попросить ИИ ещё раз", "dsn:retry")], [("❌ Отмена", "dsn:cancel")])
 
 
-def preview(path, box: Box, bot_username: str) -> BufferedInputFile:
-    return BufferedInputFile(render_preview(path, box, bot_username), filename="preview.png")
+def preview(path, box: Box, bot_username: str, name: dict | None = None) -> BufferedInputFile:
+    return BufferedInputFile(
+        render_preview(path, box, bot_username, name), filename="preview.png"
+    )
+
+
+def name_info(name: dict | None) -> str:
+    if not name:
+        return "ФИ на билете не печатается"
+    x, y, w, h = name["box"]
+    align = {"left": "слева", "center": "по центру", "right": "справа"}.get(name.get("align"), "слева")
+    return f"ФИ: x={x}, y={y}, {w}×{h} px, {align}"
 
 
 @router.message(F.text == BTN_DESIGN, Perm("design"))
@@ -382,15 +392,15 @@ async def design_menu(
     bot_username: str, screen: Screen,
 ):
     await state.clear()
-    path, box = current_template(db, config)
+    path, box, name = current_template(db, config)
     custom = path == config.template_path
     rows = [[("🖼 Загрузить новый дизайн", "dsn:new")]]
     if custom:
         rows.append([("↩️ Вернуть стандартный", "dsn:default")])
     await screen.photo(
-        await asyncio.to_thread(preview, path, box, bot_username),
-        f"Текущий дизайн билета ({'свой' if custom else 'стандартный'}), "
-        "QR показан для примера.",
+        await asyncio.to_thread(preview, path, box, bot_username, name),
+        f"Текущий дизайн билета ({'свой' if custom else 'стандартный'}). "
+        f"QR и ФИ показаны для примера.\n{name_info(name)}.",
         inline(*rows),
     )
 
@@ -398,6 +408,7 @@ async def design_menu(
 @router.callback_query(F.data == "dsn:default", Perm("design"))
 async def design_default(cb: CallbackQuery, db: Database, config: Config, screen: Screen):
     db.delete_setting("template_box")
+    db.delete_setting("template_name")
     config.template_path.unlink(missing_ok=True)
     await cb.answer()
     await screen.show("Возвращён стандартный дизайн билета.")
@@ -410,7 +421,8 @@ async def design_new(cb: CallbackQuery, state: FSMContext, screen: Screen):
     await screen.show(
         "Пришлите картинку нового дизайна билета.\n\n"
         "Лучше отправить её <b>как файл</b> (скрепка → «Файл»), чтобы Telegram не сжал "
-        "качество. ИИ найдёт место под QR-код и покажет, как будет выглядеть билет.",
+        "качество. ИИ найдёт место под QR-код и место, где на билете можно печатать "
+        "<b>ФИ</b> гостя (в шаблоне его быть не должно), и покажет, как будет выглядеть билет.",
         inline([("❌ Отмена", "dsn:cancel")]),
     )
 
@@ -435,6 +447,15 @@ async def design_upload(
     await propose(state, screen, config, bot_username)
 
 
+MANUAL_HELP = (
+    "• QR — три числа: <code>x y размер</code>;\n"
+    "• ФИ — четыре числа: <code>фи x y ширина высота</code>;\n"
+    "• <code>без фи</code> — не печатать ФИ; <code>фи слева</code> / <code>фи по центру</code> / "
+    "<code>фи справа</code> — выравнивание.\n"
+    "Всё в пикселях картинки ({w}×{h}), x и y — левый верхний угол."
+)
+
+
 async def propose(
     state: FSMContext,
     screen: Screen,
@@ -442,37 +463,43 @@ async def propose(
     bot_username: str,
     previous: Box | None = None,
     hint: str | None = None,
+    previous_name: dict | None = None,
 ):
-    """Определяет место под QR (ИИ + поиск образца QR на картинке) и шлёт предпросмотр."""
+    """Определяет места под QR и ФИ (ИИ + поиск образца QR на картинке) и шлёт предпросмотр."""
     size = await asyncio.to_thread(image_size, config.pending_path)
-    await screen.show("🤖 ИИ ищет место для QR-кода…")
-    box, source, problem = await locate_box(config, screen.db, size, previous, hint)
+    await screen.show("🤖 ИИ ищет место для QR-кода и для ФИ…")
+    box, name, source, problem = await locate_box(
+        config, screen.db, size, previous, hint, previous_name
+    )
 
     if box is None:
         await state.set_state(Design.fix)
-        await state.update_data(box=previous)
+        await state.update_data(box=previous, name=previous_name)
         return await screen.show(
-            f"{escape(problem)}\n\nУкажите место вручную — три числа через пробел: "
-            f"<code>x y размер</code> (в пикселях, картинка {size[0]}×{size[1]}, "
-            "x и y — левый верхний угол квадрата).",
+            f"{escape(problem)}\n\nУкажите места вручную:\n" + MANUAL_HELP.format(w=size[0], h=size[1]),
             FIX_KB,
         )
-    await show_preview(state, screen, config, bot_username, box, source)
+    await show_preview(state, screen, config, bot_username, box, name, source)
 
 
 async def show_preview(
     state: FSMContext, screen: Screen, config: Config, bot_username: str,
-    box: Box, source: str,
+    box: Box, name: dict | None, source: str,
 ):
     await state.set_state(Design.review)
-    await state.update_data(box=list(box))
-    note = ""
+    await state.update_data(box=list(box), name=name)
+    notes = ""
     if box[2] < 120:
-        note = "\n⚠️ QR получается мелким — может плохо сканироваться."
+        notes += "\n⚠️ QR получается мелким — может плохо сканироваться."
+    if name is None and source != "ФИ отключено":
+        notes += (
+            "\nℹ️ Подходящего места под ФИ не найдено: сейчас оно не печатается. Если оно нужно, "
+            "нажмите «Сделано неправильно» и укажите место."
+        )
     await screen.photo(
-        await asyncio.to_thread(preview, config.pending_path, box, bot_username),
-        f"{source}: x={box[0]}, y={box[1]}, размер={box[2]} px.{note}\n\n"
-        "Так будет выглядеть билет. Всё верно?",
+        await asyncio.to_thread(preview, config.pending_path, box, bot_username, name),
+        f"{source}.\nQR: x={box[0]}, y={box[1]}, размер={box[2]} px.\n{name_info(name)}.{notes}\n\n"
+        "Так будет выглядеть билет (имя в примере условное). Всё верно?",
         REVIEW_KB,
     )
 
@@ -481,12 +508,14 @@ async def show_preview(
 async def design_save(
     cb: CallbackQuery, state: FSMContext, db: Database, config: Config, screen: Screen
 ):
-    box = (await state.get_data()).get("box")
+    data = await state.get_data()
+    box = data.get("box")
     if not box or not config.pending_path.exists():
         await state.clear()
         return await cb.answer("Черновик дизайна не найден, загрузите заново", show_alert=True)
     shutil.move(config.pending_path, config.template_path)
     db.set_setting("template_box", box)
+    db.set_setting("template_name", data.get("name") or {"enabled": False})
     await state.clear()
     await cb.answer("Сохранено")
     await screen.show(
@@ -504,10 +533,9 @@ async def design_wrong(cb: CallbackQuery, state: FSMContext, config: Config, scr
     # Предпросмотр остаётся на экране, чтобы было видно, что исправлять.
     await screen.show(
         "Что не так? Варианты:\n\n"
-        "• напишите словами, что исправить (например: «QR должен быть в жёлтой части "
-        "справа») — ИИ попробует ещё раз;\n"
-        f"• или укажите место точно: <code>x y размер</code> в пикселях "
-        f"(картинка {w}×{h}, x и y — левый верхний угол квадрата);\n"
+        "• напишите словами, что исправить (например: «ФИ должно быть над QR» или "
+        "«QR должен быть в жёлтой части справа») — ИИ исправит только это;\n"
+        "• или укажите место точно:\n" + MANUAL_HELP.format(w=w, h=h) + "\n"
         "• или просто попросите ИИ попробовать снова.",
         FIX_KB,
         add=True,
@@ -523,20 +551,51 @@ async def design_retry(
     cb: CallbackQuery, state: FSMContext, config: Config, bot_username: str, screen: Screen
 ):
     await cb.answer()
-    await propose(state, screen, config, bot_username, _prev_box(await state.get_data()))
+    data = await state.get_data()
+    await propose(
+        state, screen, config, bot_username, _prev_box(data), previous_name=data.get("name")
+    )
+
+
+ALIGN_WORDS = {"слева": "left", "по центру": "center", "центр": "center", "справа": "right"}
 
 
 @router.message(Design.fix, PLAIN_TEXT, Perm("design"))
 async def design_fix(
     message: Message, state: FSMContext, config: Config, bot_username: str, screen: Screen
 ):
-    nums = re.fullmatch(r"\s*(\d+)[\s,;]+(\d+)[\s,;]+(\d+)\s*", message.text)
-    if nums:
-        w, h = image_size(config.pending_path)
-        box = clamp_box(tuple(int(n) for n in nums.groups()), w, h)
-        return await show_preview(state, screen, config, bot_username, box, "Место задано вручную")
-    previous = _prev_box(await state.get_data())
-    await propose(state, screen, config, bot_username, previous, hint=message.text)
+    text = message.text.strip()
+    data = await state.get_data()
+    box, name = _prev_box(data), data.get("name")
+    w, h = image_size(config.pending_path)
+    lower = text.lower()
+
+    def numbers(count: int):
+        pattern = r"\s*(?:фи|имя|name)?\s*" + r"[\s,;]+".join([r"(\d+)"] * count) + r"\s*"
+        m = re.fullmatch(pattern, lower)
+        return [int(n) for n in m.groups()] if m else None
+
+    if (n := numbers(4)) is not None:
+        base = name or {"enabled": True, "align": "left", "color": None}
+        name = {**base, "enabled": True, "box": clamp_name_box(n, w, h)}
+        source = "ФИ: место задано вручную"
+    elif (n := numbers(3)) is not None and not lower.startswith(("фи", "имя", "name")):
+        box = clamp_box(tuple(n), w, h)
+        source = "QR: место задано вручную"
+    elif re.fullmatch(r"(без фи|фи выкл\w*|убрать фи|не печатать фи)", lower):
+        name, source = None, "ФИ отключено"
+    elif (m := re.fullmatch(r"фи\s+(слева|по центру|центр|справа)", lower)) and name:
+        name = {**name, "align": ALIGN_WORDS[m.group(1)]}
+        source = "Выравнивание ФИ изменено"
+    else:
+        return await propose(
+            state, screen, config, bot_username, box, hint=text, previous_name=name
+        )
+    if box is None:
+        return await screen.show(
+            "Сначала нужно место под QR — укажите три числа <code>x y размер</code>.", FIX_KB
+        )
+    await show_preview(state, screen, config, bot_username, box, name, source)
 
 
 @router.callback_query(F.data.startswith("dsn:"), Perm("design"))

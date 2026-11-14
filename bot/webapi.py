@@ -29,7 +29,9 @@ from .handlers.manage import admin_label, mask, notify_admin
 from .handlers.tickets import MAX_TICKETS_AT_ONCE, clean, normalize_phone
 from . import ai, importer
 from .events import Hub
-from .imaging import clamp_box, decode_qr, extract_token, image_size, save_template
+from .imaging import (
+    ALIGNS, clamp_box, clamp_name_box, decode_qr, extract_token, image_size, save_template,
+)
 from .service import (
     current_template, export_file, groq_key, locate_box, render_preview, scanner_url,
     set_scanner_url, sync_menu_button, ticket_dict, ticket_file, ticket_png,
@@ -631,22 +633,27 @@ class WebApi:
     # ---------- дизайн билета ----------
 
     def design_payload(self, **extra) -> dict:
-        path, box = current_template(self.db, self.config)
-        return {"custom": path == self.config.template_path, "box": list(box), **extra}
+        path, box, name = current_template(self.db, self.config)
+        return {
+            "custom": path == self.config.template_path, "box": list(box),
+            "name": name, **extra,
+        }
 
     async def design_state(self, request: web.Request) -> web.Response:
         self.need(request, "design")
         return web.json_response(self.design_payload())
 
-    async def pending_payload(self, previous=None, hint=None) -> dict:
+    async def pending_payload(self, previous=None, hint=None, previous_name=None) -> dict:
         size = await asyncio.to_thread(image_size, self.config.pending_path)
-        box, source, problem = await locate_box(self.config, self.db, size, previous, hint)
+        box, name, source, problem = await locate_box(
+            self.config, self.db, size, previous, hint, previous_name
+        )
         if box is None:  # ставим в центр — админ поправит на картинке
             side = min(size) // 3
             box = clamp_box(((size[0] - side) / 2, (size[1] - side) / 2, side), *size)
             source = "Место не найдено — укажите его на картинке"
         return {
-            "box": list(box), "source": source, "problem": problem,
+            "box": list(box), "name": name, "source": source, "problem": problem,
             "width": size[0], "height": size[1],
         }
 
@@ -661,29 +668,53 @@ class WebApi:
             raise ApiError("Не удалось открыть картинку. Нужен PNG или JPG.")
         return web.json_response(await self.pending_payload())
 
-    def pending_box(self, data: dict):
+    def pending_size(self) -> tuple[int, int]:
         if not self.config.pending_path.exists():
             raise ApiError("Черновик дизайна не найден, загрузите картинку заново", 404)
+        return image_size(self.config.pending_path)
+
+    def pending_box(self, data: dict):
+        size = self.pending_size()
         try:
             raw = [float(v) for v in data.get("box", [])]
         except (TypeError, ValueError):
             raw = []
         if len(raw) != 3:
             raise ApiError("Не указано место под QR")
-        return clamp_box(tuple(raw), *image_size(self.config.pending_path))
+        return clamp_box(tuple(raw), *size)
+
+    def pending_name(self, data: dict) -> dict | None:
+        """Раскладка ФИ из запроса приложения: рамка, выравнивание, цвет; None — ФИ отключено."""
+        entry = data.get("name")
+        if not isinstance(entry, dict) or not entry.get("enabled"):
+            return None
+        try:
+            box = clamp_name_box([float(v) for v in entry.get("box", [])], *self.pending_size())
+        except (TypeError, ValueError):
+            raise ApiError("Некорректное место под ФИ")
+        color = entry.get("color")
+        return {
+            "enabled": True, "box": box,
+            "align": entry.get("align") if entry.get("align") in ALIGNS else "left",
+            "color": color if isinstance(color, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", color) else None,
+        }
 
     async def design_retry(self, request: web.Request) -> web.Response:
         self.need(request, "design")
         data = await self.body(request)
         previous = self.pending_box(data)
         hint = str(data.get("hint", "")).strip() or None
-        return web.json_response(await self.pending_payload(previous, hint))
+        return web.json_response(
+            await self.pending_payload(previous, hint, self.pending_name(data))
+        )
 
     async def design_save(self, request: web.Request) -> web.Response:
         self.need(request, "design")
-        box = self.pending_box(await self.body(request))
+        data = await self.body(request)
+        box, name = self.pending_box(data), self.pending_name(data)
         shutil.move(self.config.pending_path, self.config.template_path)
         self.db.set_setting("template_box", list(box))
+        self.db.set_setting("template_name", name or {"enabled": False})
         return web.json_response(self.design_payload())
 
     async def design_cancel(self, request: web.Request) -> web.Response:
@@ -694,22 +725,23 @@ class WebApi:
     async def design_default(self, request: web.Request) -> web.Response:
         self.need(request, "design")
         self.db.delete_setting("template_box")
+        self.db.delete_setting("template_name")
         self.config.template_path.unlink(missing_ok=True)
         return web.json_response(self.design_payload())
 
     async def design_image(self, request: web.Request) -> web.Response:
-        """PNG-предпросмотр: текущий дизайн или черновик с QR в указанном месте."""
+        """Предпросмотр: текущий дизайн или черновик с QR и примером ФИ в указанных местах."""
         self.need(request, "design")
         data = await self.body(request)
         if data.get("pending"):
-            path, box = self.config.pending_path, self.pending_box(data)
+            path, box, name = self.config.pending_path, self.pending_box(data), self.pending_name(data)
         else:
-            path, box = current_template(self.db, self.config)
-        jpeg = await asyncio.to_thread(self.preview_jpeg, path, box)
+            path, box, name = current_template(self.db, self.config)
+        jpeg = await asyncio.to_thread(self.preview_jpeg, path, box, name)
         return web.Response(body=jpeg, content_type="image/jpeg")
 
-    def preview_jpeg(self, path, box) -> bytes:
-        return self.to_jpeg(render_preview(path, box, self.bot_username))
+    def preview_jpeg(self, path, box, name=None) -> bytes:
+        return self.to_jpeg(render_preview(path, box, self.bot_username, name))
 
     @staticmethod
     def to_jpeg(png: bytes) -> bytes:

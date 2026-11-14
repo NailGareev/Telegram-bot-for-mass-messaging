@@ -12,6 +12,8 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_TEMPLATE = BASE_DIR / "assets" / "default_ticket.png"
 # Квадрат под QR на стандартном шаблоне: (x, y, сторона) в пикселях.
 DEFAULT_BOX = (1230, 177, 250)
+# Где на стандартном шаблоне печатается ФИ гостя: полоса между подзаголовком и фото.
+DEFAULT_NAME = {"enabled": True, "box": [50, 164, 600, 36], "align": "left", "color": "#fdf3b8"}
 
 
 @dataclass(frozen=True)

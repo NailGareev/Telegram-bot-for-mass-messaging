@@ -1,4 +1,4 @@
-"""Поиск места под QR-код на дизайне билета через Groq (vision-модель)."""
+"""Поиск места под QR-код и под ФИ гостя на дизайне билета через Groq (vision-модель)."""
 from __future__ import annotations
 
 import asyncio
@@ -10,21 +10,35 @@ from pathlib import Path
 import aiohttp
 from PIL import Image
 
-from .imaging import Box, clamp_box
+from .imaging import ALIGNS, Box, _hex, clamp_box, clamp_name_box
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-PROMPT = """You are looking at an event ticket design.
-Find the place where the QR code is (or should be) printed: an existing sample QR \
-code, or an empty square placeholder / white square reserved for it.
-Return the bounding box of that whole square area.
+PROMPT = """You are looking at an event ticket design. It is a TEMPLATE: the guest's \
+name is not printed on it yet.
+
+Task 1 - QR code. Find the place where the QR code is (or should be) printed: an \
+existing sample QR code, or an empty / white square reserved for it. Return the \
+bounding box of that whole square area. If there is no obvious place, choose the \
+best empty area for a QR code.
+
+Task 2 - guest name. Find the best place where the guest's full name (one short line \
+such as "Иванов Иван", up to about 30 characters) could be printed so that it looks \
+designed. Prefer, in this order: a blank line or field next to a label such as \
+"NAME", "ФИО", "Имя", "GUEST", "HOLDER"; otherwise a clean, empty horizontal strip \
+near the title, the date or the QR code. The box must be wide and short (about \
+6:1 to 14:1), must NOT cover any text, logo, photo, ornament or the QR code, and \
+should be about as tall as the neighbouring text lines. Also give the text alignment \
+that matches the surrounding text ("left", "center" or "right") and a text colour \
+that is clearly readable on that background, in the same palette as the design.
+If really no clean place exists, set "name" to null.
 
 Answer with JSON only, no other text:
-{"found": true, "x_min": 0, "y_min": 0, "x_max": 0, "y_max": 0}
-Coordinates are integers from 0 to 1000, relative to the image width (x) and \
-height (y); (0,0) is the top-left corner.
-If there is no obvious place, choose the best empty area for a QR code and still \
-return a box. Use {"found": false} only if the image is not a ticket design at all."""
+{"qr": {"x_min": 0, "y_min": 0, "x_max": 0, "y_max": 0},
+ "name": {"x_min": 0, "y_min": 0, "x_max": 0, "y_max": 0, "align": "left", "text_color": "#RRGGBB"}}
+Coordinates are integers from 0 to 1000, relative to the image width (x) and height \
+(y); (0,0) is the top-left corner. Use {"found": false} only if the image is not a \
+ticket design at all."""
 
 
 class AIError(Exception):
@@ -103,25 +117,49 @@ async def extract_records(text: str, api_key: str, model: str) -> list[dict]:
         raise AIError("ИИ вернул непонятный ответ") from e
 
 
-async def locate_qr(
+def _norm_box(entry, width: int, height: int) -> tuple[float, float, float, float]:
+    x0, y0, x1, y1 = (float(entry[k]) for k in ("x_min", "y_min", "x_max", "y_max"))
+    x0, x1 = sorted((x0 * width / 1000, x1 * width / 1000))
+    y0, y1 = sorted((y0 * height / 1000, y1 * height / 1000))
+    return x0, y0, x1, y1
+
+
+def _rel(box, width: int, height: int) -> dict:
+    x, y, w, h = box
+    return {
+        "x_min": round(x * 1000 / width), "y_min": round(y * 1000 / height),
+        "x_max": round((x + w) * 1000 / width), "y_max": round((y + h) * 1000 / height),
+    }
+
+
+async def locate_layout(
     path: Path,
     api_key: str,
     model: str,
     size: tuple[int, int],
-    previous: Box | None = None,
+    previous_qr: Box | None = None,
+    previous_name: dict | None = None,
     hint: str | None = None,
-) -> Box:
-    """Спрашивает у модели квадрат под QR. previous/hint — для повторной попытки,
-    когда администратор отметил, что прошлый вариант неправильный."""
+) -> tuple[Box, dict | None]:
+    """Спрашивает у модели, где на шаблоне QR-код и где можно печатать ФИ.
+
+    Возвращает (квадрат под QR, раскладка ФИ или None, если места нет). previous_* и hint —
+    для повторной попытки, когда администратор отметил, что прошлый вариант неправильный:
+    модель должна исправить только то, на что он указал."""
     width, height = size
     text = PROMPT
-    if previous:
-        x, y, s = previous
+    if previous_qr or previous_name:
+        prev = {}
+        if previous_qr:
+            x, y, side = previous_qr
+            prev["qr"] = _rel((x, y, side, side), width, height)
+        if previous_name and previous_name.get("box"):
+            prev["name"] = {**_rel(previous_name["box"], width, height),
+                            "align": previous_name.get("align", "left")}
         text += (
-            "\n\nYour previous answer was WRONG: "
-            f'{{"x_min": {x * 1000 // width}, "y_min": {y * 1000 // height}, '
-            f'"x_max": {(x + s) * 1000 // width}, "y_max": {(y + s) * 1000 // height}}}. '
-            "Look again carefully and give a corrected box."
+            "\n\nYour previous answer, which the user did NOT accept: "
+            + json.dumps(prev) + ". Look again carefully. Change only what the user's "
+            "correction is about and keep the other box exactly as it was."
         )
     if hint:
         text += f"\nThe user's correction (may be in Russian): {hint[:300]}"
@@ -129,8 +167,8 @@ async def locate_qr(
     b64 = await asyncio.to_thread(_encode, path)
     payload = {
         "model": model,
-        "temperature": 0.4 if previous else 0,
-        "max_completion_tokens": 200,
+        "temperature": 0.4 if (previous_qr or previous_name) else 0,
+        "max_completion_tokens": 400,
         "response_format": {"type": "json_object"},
         "messages": [
             {
@@ -149,18 +187,35 @@ async def locate_qr(
 
     try:
         answer = json.loads(body["choices"][0]["message"]["content"])
-        if not answer.get("found", True):
-            raise AIError("ИИ не нашёл на картинке место под QR")
-        x0, y0, x1, y1 = (
-            float(answer[k]) for k in ("x_min", "y_min", "x_max", "y_max")
-        )
+        if not isinstance(answer, dict) or not answer.get("found", True):
+            raise AIError("ИИ не нашёл на картинке билет")
+        x0, y0, x1, y1 = _norm_box(answer["qr"], width, height)
     except (KeyError, IndexError, TypeError, ValueError) as e:
         raise AIError("ИИ вернул непонятный ответ") from e
 
-    x0, x1 = sorted((x0 * width / 1000, x1 * width / 1000))
-    y0, y1 = sorted((y0 * height / 1000, y1 * height / 1000))
     side = min(x1 - x0, y1 - y0)
     if side < 10:
         raise AIError("ИИ вернул слишком маленькую область")
-    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    return clamp_box((cx - side / 2, cy - side / 2, side), width, height)
+    qr = clamp_box(((x0 + x1) / 2 - side / 2, (y0 + y1) / 2 - side / 2, side), width, height)
+
+    name = None
+    try:
+        entry = answer.get("name")
+        if isinstance(entry, dict):
+            nx0, ny0, nx1, ny1 = _norm_box(entry, width, height)
+            nw, nh = nx1 - nx0, ny1 - ny0
+            qx, qy, qs = qr
+            overlap = (
+                min(nx1, qx + qs) > max(nx0, qx) and min(ny1, qy + qs) > max(ny0, qy)
+            )
+            if nw >= 60 and nh >= 14 and nw >= 2.5 * nh and not overlap:
+                color = entry.get("text_color")
+                name = {
+                    "enabled": True,
+                    "box": clamp_name_box((nx0, ny0, nw, nh), width, height),
+                    "align": entry.get("align") if entry.get("align") in ALIGNS else "left",
+                    "color": color if isinstance(color, str) and _hex(color) else None,
+                }
+    except (KeyError, TypeError, ValueError):
+        name = None
+    return qr, name
