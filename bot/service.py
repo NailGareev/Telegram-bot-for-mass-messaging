@@ -1,11 +1,10 @@
-"""Общие операции, которыми пользуются разные обработчики."""
+"""Общие операции: доступ, отрисовка билетов, поиск места под QR и ФИ."""
 from __future__ import annotations
 
 import asyncio
 import io
 import logging
 from contextlib import suppress
-from html import escape
 from pathlib import Path
 
 from aiogram import BaseMiddleware, Bot
@@ -17,12 +16,11 @@ from aiogram.types import (
 
 from . import ai, ui
 
-from .access import PERMS, Access, parse_perms, resolve_access
+from .access import Access, resolve_access
 from .config import DEFAULT_BOX, DEFAULT_NAME, DEFAULT_TEMPLATE, Config
 from .db import Database, Ticket
 from .imaging import SAMPLE_NAME, Box, find_qr_boxes, qr_payload, render_ticket
-from .events import Hub
-from .ui import can_delete, client_block, export_txt, fmt_dt, main_menu, ticket_code
+from .ui import can_delete, export_txt, fmt_dt, ticket_code
 
 
 log = logging.getLogger(__name__)
@@ -31,34 +29,8 @@ PREVIEW_TOKEN = "PREVIEW_PREVIEW_"
 
 
 def groq_key(db: Database, config: Config) -> str:
-    """Ключ Groq: заданный в боте (раздел «Настройки»), иначе из .env."""
+    """Ключ Groq: заданный в приложении (Настройки), иначе из .env."""
     return db.get_setting("groq_api_key") or config.groq_api_key
-
-
-def scanner_url(db: Database, config: Config) -> str:
-    """Адрес страницы-сканера: заданный в боте, иначе из .env."""
-    return db.get_setting("scanner_url") or config.scanner_url
-
-
-async def refresh_keyboards(bot: Bot, db: Database, config: Config, text: str) -> None:
-    """Присылает всем администраторам клавиатуру заново (например, когда
-    сменился адрес сканера, зашитый в кнопку «Сканировать»)."""
-    targets = {i: Access(i, True, frozenset(PERMS)) for i in config.main_admin_ids}
-    for a in db.list_admins():
-        if a["user_id"]:
-            targets.setdefault(a["user_id"], Access(a["user_id"], False, parse_perms(a["perms"])))
-    for user_id, access in targets.items():
-        with suppress(TelegramAPIError):
-            await Screen(bot, db, user_id).menu(text, access)
-
-
-async def set_scanner_url(bot: Bot, db: Database, config: Config, url: str) -> None:
-    if url:
-        db.set_setting("scanner_url", url)
-    else:
-        db.delete_setting("scanner_url")
-    ui.scanner_url = ui.versioned(scanner_url(db, config))
-    await refresh_keyboards(bot, db, config, "Кнопка «Сканировать» обновлена.")
 
 
 async def sync_menu_button(bot: Bot, user_id: int, admin: bool = True) -> None:
@@ -134,7 +106,6 @@ class Screen:
     def __init__(self, bot: Bot, db: Database, chat_id: int):
         self.bot, self.db, self.chat_id = bot, db, chat_id
         self._key = f"screen:{chat_id}"
-        self._anchor_key = f"menu:{chat_id}"
 
     async def _delete(self, ids: list[int]) -> None:
         if ids:
@@ -172,22 +143,10 @@ class Screen:
     async def document(self, file, caption: str | None = None) -> Message:
         return await self.bot.send_document(self.chat_id, file, caption=caption)
 
-    async def menu(self, text: str, access: Access) -> None:
-        """Сообщение с клавиатурой главного меню. Оно не удаляется при переходах
-        (иначе Telegram спрятал бы клавиатуру) — только заменяется новым меню."""
-        message = await self.bot.send_message(
-            self.chat_id, text, reply_markup=main_menu(access)
-        )
-        old = self.db.get_setting(self._anchor_key)
-        if old:
-            await self._delete([old])
-        self.db.set_setting(self._anchor_key, message.message_id)
-
 
 class AccessMiddleware(BaseMiddleware):
     """Пускает к боту только администраторов. Всем остальным бот не отвечает
-    вообще ничего. Заодно убирает из чата сообщения самого админа после
-    обработки, чтобы в чате оставались только экран раздела и результаты."""
+    вообще ничего."""
 
     async def __call__(self, handler, event: Message | CallbackQuery, data: dict):
         user = event.from_user
@@ -200,12 +159,7 @@ class AccessMiddleware(BaseMiddleware):
             return None
         data["access"] = access
         data["screen"] = Screen(data["bot"], db, message.chat.id)
-        try:
-            return await handler(event, data)
-        finally:
-            if isinstance(event, Message):
-                with suppress(TelegramAPIError):
-                    await event.delete()
+        return await handler(event, data)
 
 
 def current_template(db: Database, config: Config) -> tuple[Path, Box, dict | None]:
@@ -273,48 +227,21 @@ def ticket_dict(t: Ticket, access: Access, config: Config) -> dict:
     }
 
 
-def scan_text(status: str, t: Ticket | None, config: Config) -> str:
-    """Текст результата сканирования для чата."""
-    if status == "ok":
-        return (
-            "✅ <b>БИЛЕТ ДЕЙСТВИТЕЛЕН</b> — первое сканирование\n\n"
-            + client_block(t, config)
-            + f"\n\n🕒 Отмечен: {fmt_dt(t['first_scan_at'], config)}"
-        )
-    if status == "repeat":
-        return (
-            f"⚠️ <b>ПОВТОРНОЕ СКАНИРОВАНИЕ</b> — билет сканируется уже {t['scan_count']}-й раз!\n"
-            f"Первое сканирование: <b>{fmt_dt(t['first_scan_at'], config)}</b>"
-            f" (админ: {escape(t['first_scan_by_name'] or '—')})\n\n"
-            + client_block(t, config)
-        )
-    if status == "not_found":
-        return (
-            "❌ <b>БИЛЕТ НЕ НАЙДЕН</b>\nТакого билета нет в базе (возможно, он удалён "
-            "или список был сброшен)."
-        )
-    if status == "unreadable":
-        return "Не удалось прочитать QR на фото. Попробуйте снять ближе и ровнее."
-    return "❌ Это QR-код не от нашего билета."
+def admin_label(a) -> str:
+    return a["name"] if a["user_id"] else f"@{a['username']}"
 
 
-async def report_scan(
-    screen: Screen, hub: Hub, access: Access, db: Database, config: Config,
-    status: str, t: Ticket | None = None, by_name: str = "",
-) -> None:
-    """Результат сканирования из чата. Если у админа открыт Mini App, уведомление
-    показывается в нём, иначе (или если приложение не подтвердило) — в чате."""
-    if t is not None:  # проверка билета: отмечаем проход
-        t, first = db.register_scan(t["id"], by_name)
-        status = "ok" if first else "repeat"
-    text = scan_text(status, t, config)
-    event = {
-        "type": "scan", "status": status,
-        "ticket": ticket_dict(t, access, config) if t is not None else None,
-    }
+def mask(secret: str) -> str:
+    return "…" + secret[-4:] if len(secret) > 8 else "…"
 
-    async def fallback() -> None:
-        await screen.send(text)
 
-    if not hub.publish(screen.chat_id, event, fallback):
-        await screen.send(text)
+async def notify_admin(bot: Bot, a, text: str) -> bool:
+    """Сообщает админу о назначении (если он уже открывал бота) и ставит кнопку Mini App."""
+    if not a["user_id"]:
+        return False
+    try:
+        await bot.send_message(a["user_id"], text)
+    except TelegramAPIError:
+        return False
+    await sync_menu_button(bot, a["user_id"])
+    return True

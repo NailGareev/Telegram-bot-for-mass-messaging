@@ -64,13 +64,3 @@ class IsMain(BaseFilter):
 
     async def __call__(self, event: TelegramObject, access: Access) -> bool:
         return access.is_main
-
-
-class Perm(BaseFilter):
-    """Пропускает только тех, у кого есть разрешение на раздел."""
-
-    def __init__(self, perm: str):
-        self.perm = perm
-
-    async def __call__(self, event: TelegramObject, access: Access) -> bool:
-        return access.can(self.perm)

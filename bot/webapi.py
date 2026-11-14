@@ -25,16 +25,15 @@ from PIL import Image, UnidentifiedImageError
 from .access import DEFAULT_PERMS, PERMS, Access, dump_perms, parse_perms, resolve_access
 from .config import BASE_DIR, Config
 from .db import Database
-from .handlers.manage import admin_label, mask, notify_admin
-from .handlers.tickets import MAX_TICKETS_AT_ONCE, clean, normalize_phone
+from .importer import MAX_TICKETS_AT_ONCE, clean, normalize_phone
 from . import ai, importer
 from .events import Hub
 from .imaging import (
     ALIGNS, clamp_box, clamp_name_box, decode_qr, extract_token, image_size, save_template,
 )
 from .service import (
-    current_template, export_file, groq_key, locate_box, render_preview, scanner_url,
-    set_scanner_url, sync_menu_button, ticket_dict, ticket_file, ticket_png,
+    admin_label, current_template, export_file, groq_key, locate_box, mask, notify_admin,
+    render_preview, sync_menu_button, ticket_dict, ticket_file, ticket_png,
 )
 from .ui import can_delete, client_block, export_txt, ticket_code
 
@@ -608,7 +607,8 @@ class WebApi:
         perms = dump_perms({p for p in parse_perms(DEFAULT_PERMS) if access.can(p)})
         admin_id = self.db.add_admin(user_id, username, name, perms)
         await notify_admin(
-            self.bot, self.db, self.db.get_admin(admin_id), "Вас назначили администратором билетов."
+            self.bot, self.db.get_admin(admin_id),
+            "Вас назначили администратором билетов. Откройте приложение: кнопка «Mini App» слева от поля ввода.",
         )
         return web.json_response({**self.admins_payload(access), "added": admin_id})
 
@@ -761,7 +761,6 @@ class WebApi:
         return {
             "groq_set": bool(key),
             "groq_hint": mask(key) if key else "",
-            "scanner_url": scanner_url(self.db, self.config),
         }
 
     @staticmethod
@@ -784,12 +783,6 @@ class WebApi:
                 self.db.set_setting("groq_api_key", key)
             else:
                 self.db.delete_setting("groq_api_key")
-        if "scanner_url" in data:
-            url = str(data["scanner_url"]).strip()
-            if url and not re.fullmatch(r'https://[^\s<>"]{4,300}', url):
-                raise ApiError("Адрес сканера должен начинаться с https://")
-            if url != (self.db.get_setting("scanner_url") or ""):
-                await set_scanner_url(self.bot, self.db, self.config, url)
         return web.json_response(self.settings_payload())
 
     # ---------- сброс ----------

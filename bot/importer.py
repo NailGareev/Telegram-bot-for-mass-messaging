@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_RECORDS = 300
 MAX_TICKETS_TOTAL = 1000
+MAX_TICKETS_AT_ONCE = 10   # билетов на одни данные за раз
 CHUNK_CHARS = 4500
 MAX_FIELD = 100
 

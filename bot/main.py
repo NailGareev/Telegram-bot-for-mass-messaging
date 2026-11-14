@@ -14,9 +14,9 @@ from aiohttp import web
 from .config import BASE_DIR, Config, load_config
 from .db import Database
 from . import ui
-from .handlers import fallback, manage, tickets, update
+from .handlers import fallback, update
 from . import updater
-from .service import AccessMiddleware, scanner_url, sync_menu_button
+from .service import AccessMiddleware, sync_menu_button
 from .events import Hub
 from .tunnel import Tunnel
 from .webapi import PAGE, WebApi
@@ -81,7 +81,6 @@ def build_dispatcher(
     db: Database, config: Config, bot_username: str, hub: Hub | None = None,
     restarter: updater.Restarter | None = None,
 ) -> Dispatcher:
-    ui.scanner_url = ui.versioned(scanner_url(db, config))
     dp = Dispatcher(
         db=db, config=config, bot_username=bot_username, hub=hub or Hub(),
         restarter=restarter or updater.Restarter(),
@@ -91,8 +90,8 @@ def build_dispatcher(
     access = AccessMiddleware()
     dp.message.outer_middleware(access)
     dp.callback_query.outer_middleware(access)
-    # Порядок важен: обновление проекта, разделы управления, билеты, затем «всё остальное»
-    dp.include_routers(update.router, manage.router, tickets.router, fallback.router)
+    # Порядок важен: сначала обновление проекта, затем «всё остальное» (подсказка про приложение)
+    dp.include_routers(update.router, fallback.router)
     return dp
 
 
@@ -112,8 +111,7 @@ async def run() -> bool:
     me = await bot.get_me()
     await bot.set_my_commands(
         [
-            BotCommand(command="start", description="Главное меню"),
-            BotCommand(command="cancel", description="Отменить текущее действие"),
+            BotCommand(command="start", description="Где приложение Mini App"),
         ]
     )
     hub, restarter = Hub(), updater.Restarter()

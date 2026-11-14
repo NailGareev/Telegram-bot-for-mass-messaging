@@ -176,17 +176,6 @@
   /* Счётчик */
   .stepper button { display: grid; place-items: center; width: 54px; height: 54px; padding: 0; }
 
-  /* Уведомление поверх любого экрана (результат сканирования из чата) */
-  #modal { position: fixed; inset: 0; z-index: 20; display: none; align-items: center; justify-content: center;
-    padding: 20px; background: rgba(20, 8, 6, .72); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); overflow-y: auto; }
-  #modal.show { display: flex; }
-  #modal .sheet { width: 100%; max-width: 440px; margin: auto; padding: 18px; border-radius: 24px;
-    background: linear-gradient(180deg, #4a2a22, #2b1612); box-shadow: 0 0 0 1px var(--line), 0 30px 80px rgba(0, 0, 0, .55);
-    animation: pop .18s ease-out; }
-  #modal .sheet .card { margin-bottom: 14px; }
-  #modal .eyebrow { margin-bottom: 10px; }
-  @keyframes pop { from { transform: translateY(14px) scale(.97); opacity: 0; } to { transform: none; opacity: 1; } }
-
   /* Массовый залив */
   .drop { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 26px 16px; text-align: center;
     border: 1.5px dashed rgba(233, 196, 106, .5); border-radius: 20px; background: rgba(255, 244, 214, .04); margin-bottom: 14px; }
@@ -232,7 +221,6 @@
 <body>
 <div id="app"><p class="loading">Загрузка…</p></div>
 <div id="toast" role="status"></div>
-<div id="modal" role="dialog" aria-modal="true"></div>
 
 <script>
 (function () {
@@ -361,11 +349,9 @@
   // ---------- навигация ----------
 
   var views = {};
-  var scanSink = null;   // куда выводить результат сканирования, если открыт экран «Сканер»
   function render() {
     var top = stack[stack.length - 1];
     window.scrollTo(0, 0);
-    scanSink = null;
     try {
       if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide();
     } catch (e) {}
@@ -542,7 +528,6 @@
       if (button) button.textContent = "Сканировать следующий";
       window.scrollTo(0, 0);
     }
-    scanSink = show;
     function check(data) {
       return api("scan", { data: data }).then(show).catch(function (error) { toast(error.message, true); });
     }
@@ -1045,10 +1030,7 @@
         '<div class="row"><button class="btn primary" type="submit" data-icon="check">Сохранить ключ</button>' +
         (data.groq_set ? '<button class="btn fit danger" type="button" id="groqDel">Удалить</button>' : "") + "</div></form>" +
         '<p class="muted small" style="margin-top:10px">Нужен для смены дизайна билета (ИИ находит место под QR-код и под ФИ) и для разбора списков при массовом заливе. Бесплатный ключ — на console.groq.com/keys</p>' +
-        '<form id="scannerForm" style="margin-top:22px"><label class="field"><span>Адрес страницы-сканера</span>' +
-        '<input id="scanner" type="text" inputmode="url" autocomplete="off" autocapitalize="off" placeholder="https://логин.github.io/репозиторий/" value="' + esc(data.scanner_url) + '"></label>' +
-        '<button class="btn primary" type="submit" data-icon="check">Сохранить адрес</button></form>' +
-        '<p class="muted small" style="margin-top:10px">С этим адресом кнопка «Сканировать» на клавиатуре бота сразу открывает камеру. Оставьте поле пустым, чтобы убрать адрес. Сканер в этом приложении работает и без него.</p>';
+        '<h2>Обновление проекта</h2><div class="card"><p>Скачайте проект на GitHub (<b>Code → Download ZIP</b>) и пришлите этот zip-файл в чат с ботом — бот покажет, что изменится, и установит обновление.</p><p class="muted small" style="margin:0">Настройки, база билетов и ключи не затрагиваются.</p></div>';
       function save(button, body, message) {
         run(button, function () {
           return api("settings/set", body).then(function (fresh) { toast(message); show(fresh); });
@@ -1060,10 +1042,6 @@
         save(this.querySelector("button"), { groq_api_key: $("#groq").value }, "Ключ сохранён");
       });
       on("#groqDel", "click", function () { save(this, { groq_api_key: "" }, "Ключ удалён"); });
-      $("#scannerForm").addEventListener("submit", function (event) {
-        event.preventDefault();
-        save(this.querySelector("button"), { scanner_url: $("#scanner").value }, "Адрес сохранён");
-      });
     }).catch(failed);
   };
 
@@ -1091,30 +1069,11 @@
   };
 
   // ---------- уведомления ----------
-  // Пока приложение открыто, бот присылает сюда результаты сканирования из чата
-  // (ссылка из QR, фото, номер) и сообщения о фоновых задачах.
-
-  var notices = [];
-  var modal = document.getElementById("modal");
-
-  function showNextNotice() {
-    var ev = notices[0];
-    if (!ev) { modal.className = ""; modal.innerHTML = ""; return; }
-    modal.innerHTML = '<div class="sheet"><p class="eyebrow">' + ic("bell").replace("<svg ", '<svg style="vertical-align:-4px;margin-right:6px" ') +
-      "Сканирование" + (notices.length > 1 ? " · ещё " + (notices.length - 1) : "") + "</p>" + scanHtml(ev, true) +
-      '<button class="btn primary" id="dismiss">' + ic("check") + "Понятно</button></div>";
-    modal.className = "show";
-    document.getElementById("dismiss").addEventListener("click", function () { notices.shift(); showNextNotice(); });
-  }
+  // Пока приложение открыто, бот присылает сюда сообщения о фоновых задачах
+  // (например, «билеты массового залива отправлены в чат»).
 
   function handleEvent(ev) {
-    if (ev.type === "scan") {
-      if (scanSink) return scanSink(ev);       // открыт экран сканера — показываем в нём
-      notices.push(ev);
-      if (notices.length === 1) showNextNotice();
-    } else if (ev.type === "notice") {
-      toast(ev.text, !!ev.error);
-    }
+    if (ev.type === "notice") toast(ev.text, !!ev.error);
   }
 
   var lastEvent = null;

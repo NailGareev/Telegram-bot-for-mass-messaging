@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from html import escape
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -60,6 +62,8 @@ async def update_received(
 ):
     doc = message.document
     await state.clear()
+    with suppress(TelegramAPIError):
+        await message.delete()   # архив вычитывается ниже; в чате он не нужен
     if doc.file_size and doc.file_size > TELEGRAM_DOWNLOAD_LIMIT:
         return await screen.show(
             "❌ Архив больше 20 МБ — Telegram не даёт боту скачать такой файл. "
@@ -78,6 +82,13 @@ async def update_received(
         plan_text(plan, doc.file_name or "архив"),
         inline([("✅ Установить и перезапустить", "upd:go")], [("❌ Отмена", "upd:cancel")]),
     )
+
+
+@router.callback_query(F.data == "cancel", IsMain())
+async def close_screen(cb: CallbackQuery, screen: Screen):
+    """Кнопка «Закрыть» на экранах обновления."""
+    await cb.answer()
+    await screen.clear()
 
 
 @router.callback_query(F.data == "upd:cancel", IsMain())
