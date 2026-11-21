@@ -248,6 +248,7 @@ async def notify_topup(bot: Bot, db: Database, order, intro: str = "") -> bool:
     rows = []
     if url:
         rows.append([InlineKeyboardButton(text="💳 Доплатить через Kaspi", url=url)])
+    rows.append([InlineKeyboardButton(text="🆘 Нужна помощь", callback_data="shop:support")])
     try:
         await bot.send_message(order["user_id"], text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
     except TelegramAPIError:

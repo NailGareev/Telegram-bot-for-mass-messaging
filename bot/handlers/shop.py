@@ -19,7 +19,7 @@ from aiogram.types import (
     Message, ReplyKeyboardMarkup, ReplyKeyboardRemove,
 )
 
-from .. import receipts, shop
+from .. import receipts, shop, support
 from ..access import Access
 from ..config import Config
 from ..db import Database, now_iso
@@ -87,6 +87,7 @@ def catalog_view(db: Database, user_id: int):
             rows.append([button(f"💳 Доплатить заказ №{o['id']}", f"shop:topup:{o['id']}")])
     if db.orders_of_user(user_id, 1):
         rows.append([button("🧾 Мои заказы", "shop:orders")])
+    rows.append([button("🆘 Поддержка", "shop:support")])
     return text, (kb(*rows) if rows else None)
 
 
@@ -104,6 +105,8 @@ async def drop(cb: CallbackQuery) -> None:
 @router.message(CommandStart(), ~IsAdmin())
 async def start(message: Message, bot: Bot, db: Database):
     db.cancel_flow_orders(message.from_user.id)   # начали заново — незавершённый заказ не нужен
+    db.ensure_thread(message.from_user.id, message.from_user.username, message.from_user.full_name)
+    db.update_thread(message.from_user.id, talking=0)
     await send_catalog(bot, db, message.from_user.id)
 
 
@@ -111,6 +114,7 @@ async def start(message: Message, bot: Bot, db: Database):
 async def home(cb: CallbackQuery, bot: Bot, db: Database):
     await cb.answer()
     db.cancel_flow_orders(cb.from_user.id)
+    db.update_thread(cb.from_user.id, talking=0)
     await drop(cb)
     await send_catalog(bot, db, cb.from_user.id)
 
@@ -137,7 +141,13 @@ async def choose(cb: CallbackQuery, bot: Bot, db: Database, config: Config, bot_
     db.cancel_flow_orders(user.id)
     order_id = db.create_order(user.id, user.username, user.full_name, t)
     await drop(cb)
+    await send_type_card(bot, db, config, bot_username, user.id, t, order_id)
 
+
+async def send_type_card(
+    bot: Bot, db: Database, config: Config, bot_username: str, user_id: int, t, order_id: int
+) -> None:
+    """Карточка билета: картинка дизайна, цена, кнопки оплаты."""
     path, box, name = current_template(db, config, t["id"])
     png = await asyncio.to_thread(render_preview, path, box, bot_username, name)
     url = shop.pay_url(db, t)
@@ -158,10 +168,10 @@ async def choose(cb: CallbackQuery, bot: Bot, db: Database, config: Config, bot_
         rows.append([InlineKeyboardButton(text="💳 Оплатить через Kaspi", url=url)])
         rows.append([button("✅ Я оплатил(а)", f"shop:paid:{order_id}")])
     else:
-        caption += "⚠️ Ссылка на оплату пока не настроена. Попробуйте позже или обратитесь к организатору."
-    rows.append([button("⬅️ Назад", "shop:home")])
+        caption += "⚠️ Ссылка на оплату пока не настроена. Попробуйте позже или обратитесь в поддержку."
+    rows.append([button("⬅️ Назад", "shop:home"), button("🆘 Поддержка", "shop:support")])
     await bot.send_photo(
-        user.id, BufferedInputFile(png, filename="ticket.png"), caption=caption, reply_markup=kb(*rows)
+        user_id, BufferedInputFile(png, filename="ticket.png"), caption=caption, reply_markup=kb(*rows)
     )
 
 
@@ -171,6 +181,12 @@ def own_order(db: Database, cb: CallbackQuery):
 
 
 CANCEL_ROW = lambda order_id: [button("❌ Отменить заказ", f"shop:cancel:{order_id}")]  # noqa: E731
+HELP_ROW = [button("🆘 Нужна помощь", "shop:support")]
+RECEIPT_PROMPT = (
+    "📎 Пришлите <b>PDF-чек</b> об оплате <b>файлом</b>.\n\n"
+    "В Kaspi: Платежи → нужный платёж → Чек → «Поделиться» → PDF. "
+    "Скриншот не подойдёт — нужен именно PDF."
+)
 
 
 @router.callback_query(F.data.regexp(r"^shop:paid:\d+$"))
@@ -183,11 +199,7 @@ async def paid(cb: CallbackQuery, bot: Bot, db: Database):
     with suppress(TelegramAPIError):
         await cb.message.edit_reply_markup(reply_markup=None)
     await bot.send_message(
-        cb.from_user.id,
-        "📎 Пришлите <b>PDF-чек</b> об оплате <b>файлом</b>.\n\n"
-        "В Kaspi: Платежи → нужный платёж → Чек → «Поделиться» → PDF. "
-        "Скриншот не подойдёт — нужен именно PDF.",
-        reply_markup=kb(CANCEL_ROW(order["id"])),
+        cb.from_user.id, RECEIPT_PROMPT, reply_markup=kb(CANCEL_ROW(order["id"]), HELP_ROW),
     )
 
 
@@ -204,6 +216,86 @@ async def cancel(cb: CallbackQuery, bot: Bot, db: Database):
     await drop(cb)
     await bot.send_message(cb.from_user.id, "Заказ отменён.", reply_markup=ReplyKeyboardRemove())
     await send_catalog(bot, db, cb.from_user.id)
+
+
+# ---------- поддержка ----------
+
+
+class Talking(BaseFilter):
+    """Клиент сейчас пишет в поддержку: все его сообщения (кроме /start) — оператору."""
+
+    async def __call__(self, event, db: Database) -> bool:
+        thread = db.get_thread(event.from_user.id)
+        return bool(thread and thread["talking"])
+
+
+@router.callback_query(F.data == "shop:support")
+async def support_open(cb: CallbackQuery, bot: Bot, db: Database, access: Access | None):
+    if access is not None:
+        return await cb.answer("Вы администратор: чаты клиентов — в приложении, раздел «Поддержка».", show_alert=True)
+    await cb.answer()
+    user = cb.from_user
+    db.ensure_thread(user.id, user.username, user.full_name)
+    thread = db.get_thread(user.id)
+    db.update_thread(
+        user.id, status="open", talking=1,
+        opened_at=thread["opened_at"] if thread["status"] == "open" and thread["opened_at"] else now_iso(),
+    )
+    await drop(cb)
+    rows = []
+    if db.active_order(user.id):
+        rows.append([button("▶️ Вернуться к заказу", "shop:cont")])
+    rows.append([button("⬅️ К билетам", "shop:home")])
+    await bot.send_message(
+        user.id,
+        "🆘 <b>Поддержка</b>\n\nНапишите, что случилось, — одним или несколькими сообщениями. "
+        "Можно приложить фото и файлы. Оператор ответит прямо здесь, в этом чате.",
+        reply_markup=kb(*rows),
+    )
+
+
+@router.callback_query(F.data == "shop:cont")
+async def support_continue(
+    cb: CallbackQuery, bot: Bot, db: Database, config: Config, bot_username: str
+):
+    """Клиент закончил писать оператору и возвращается к покупке: повторяем текущий шаг."""
+    await cb.answer()
+    db.update_thread(cb.from_user.id, talking=0)
+    await drop(cb)
+    order = db.active_order(cb.from_user.id)
+    if not order:
+        return await send_catalog(bot, db, cb.from_user.id)
+    uid, st = cb.from_user.id, order["status"]
+    if st == "chosen" and db.get_type(order["type_id"]):
+        await send_type_card(bot, db, config, bot_username, uid, db.get_type(order["type_id"]), order["id"])
+    elif st == "receipt":
+        await bot.send_message(uid, RECEIPT_PROMPT, reply_markup=kb(CANCEL_ROW(order["id"]), HELP_ROW))
+    elif st == "topup":
+        await shop.notify_topup(bot, db, order)
+    elif st == "name":
+        await bot.send_message(uid, "Введите ваши <b>фамилию и имя</b>:", reply_markup=kb(CANCEL_ROW(order["id"]), HELP_ROW))
+    elif st == "phone":
+        await bot.send_message(uid, "Введите <b>номер телефона</b> или нажмите кнопку ниже:", reply_markup=CONTACT_KB)
+    elif st == "univ":
+        await bot.send_message(uid, "Введите <b>университет</b>:")
+
+
+async def to_support(message: Message, bot: Bot, db: Database, config: Config, hub: Hub) -> None:
+    """Сообщение клиента — оператору: помечаем непрочитанным, подтверждаем клиенту, зовём админов."""
+    user = message.from_user
+    db.ensure_thread(user.id, user.username, user.full_name)
+    db.update_thread(user.id, status="open")
+    db.bump_unread(user.id)
+    thread = db.get_thread(user.id)
+    if support.should_ack(thread):
+        db.update_thread(user.id, ack_at=now_iso())
+        await message.answer("✅ Передал оператору. Ответ придёт сюда, в этот чат.")
+    await support.notify_admins(bot, db, config, hub, thread, support.describe(message)["preview"])
+
+
+@router.message(Talking())
+async def support_message(message: Message, bot: Bot, db: Database, config: Config, hub: Hub):
+    await to_support(message, bot, db, config, hub)
 
 
 # ---------- чек ----------
@@ -261,7 +353,7 @@ async def receipt_file(
     db.update_order(order["id"], status="name")
     await message.answer(
         f"{intro}\n\nТеперь введите ваши <b>фамилию и имя</b>:",
-        reply_markup=kb(CANCEL_ROW(order["id"])),
+        reply_markup=kb(CANCEL_ROW(order["id"]), HELP_ROW),
     )
 
 
@@ -405,7 +497,10 @@ async def retry(cb: CallbackQuery, bot: Bot, db: Database):
 
 
 @router.message(~IsAdmin())
-async def anything(message: Message, bot: Bot, db: Database):
+async def anything(message: Message, bot: Bot, db: Database, config: Config, hub: Hub):
+    thread = db.get_thread(message.from_user.id)
+    if thread and thread["status"] == "open":   # идёт обращение (например, оператор написал первым)
+        return await to_support(message, bot, db, config, hub)
     await send_catalog(bot, db, message.from_user.id)
 
 

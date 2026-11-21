@@ -1,4 +1,4 @@
-"""Лёгкая база на SQLite: билеты, типы билетов, заказы, администраторы, настройки."""
+"""Лёгкая база на SQLite: билеты, типы билетов, заказы, переписка с клиентами, администраторы, настройки."""
 from __future__ import annotations
 
 import json
@@ -79,6 +79,39 @@ CREATE TABLE IF NOT EXISTS order_receipts (    -- у заказа может б�
 );
 CREATE INDEX IF NOT EXISTS order_receipts_order ON order_receipts (order_id);
 CREATE INDEX IF NOT EXISTS order_receipts_number ON order_receipts (number);
+CREATE TABLE IF NOT EXISTS chat_messages (     -- вся переписка клиентов с ботом (для поддержки)
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,              -- клиент (его чат с ботом)
+    direction   TEXT NOT NULL,                 -- in — клиент; bot — бот сам; admin — оператор от имени бота
+    kind        TEXT NOT NULL DEFAULT 'text',  -- text, photo, document, voice, video, audio, sticker, contact, location, button, other
+    text        TEXT NOT NULL DEFAULT '',
+    file_id     TEXT NOT NULL DEFAULT '',      -- Telegram file_id: по нему файл скачивается и пересылается
+    file_name   TEXT NOT NULL DEFAULT '',
+    mime        TEXT NOT NULL DEFAULT '',
+    size        INTEGER NOT NULL DEFAULT 0,
+    buttons     TEXT NOT NULL DEFAULT '',      -- JSON: подписи кнопок под сообщением бота
+    admin_name  TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_user ON chat_messages (user_id, id);
+CREATE TABLE IF NOT EXISTS support_threads (   -- по строке на клиента, написавшего боту
+    user_id     INTEGER PRIMARY KEY,
+    username    TEXT,
+    name        TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'idle',  -- idle — обычный покупатель; open — обращение в поддержку; closed
+    talking     INTEGER NOT NULL DEFAULT 0,    -- клиент сейчас пишет в поддержку (все его сообщения — оператору)
+    unread      INTEGER NOT NULL DEFAULT 0,    -- сообщений клиента, которые админы ещё не открывали
+    notified    INTEGER NOT NULL DEFAULT 0,    -- админам уже отправлено уведомление в чат
+    assigned_to TEXT NOT NULL DEFAULT '',      -- кто сейчас ведёт обращение
+    assigned_at TEXT,
+    ack_at      TEXT,                          -- когда клиенту последний раз отвечали «передано оператору»
+    last_at     TEXT,
+    last_text   TEXT NOT NULL DEFAULT '',
+    last_dir    TEXT NOT NULL DEFAULT '',
+    opened_at   TEXT,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS support_threads_last ON support_threads (last_at);
 CREATE TABLE IF NOT EXISTS admins (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id  INTEGER UNIQUE,          -- NULL, пока добавленный по нику не написал боту
@@ -477,6 +510,103 @@ class Database:
         return bool(number) and self.conn.execute(
             "SELECT 1 FROM order_receipts WHERE order_id = ? AND number = ? AND void = 0",
             (order_id, number)).fetchone() is not None
+
+    # ---------- переписка и поддержка ----------
+
+    THREAD_FIELDS = {
+        "username", "name", "status", "talking", "unread", "notified", "assigned_to",
+        "assigned_at", "ack_at", "opened_at",
+    }
+
+    def ensure_thread(self, user_id: int, username: str | None = None, name: str = "") -> sqlite3.Row:
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO support_threads (user_id, username, name, created_at) VALUES (?,?,?,?)"
+                " ON CONFLICT(user_id) DO NOTHING", (user_id, username, name, now_iso()),
+            )
+            if username is not None or name:   # профиль мог измениться
+                self.conn.execute(
+                    "UPDATE support_threads SET username = COALESCE(?, username),"
+                    " name = CASE WHEN ? != '' THEN ? ELSE name END WHERE user_id = ?",
+                    (username, name, name, user_id),
+                )
+        return self.get_thread(user_id)
+
+    def get_thread(self, user_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM support_threads WHERE user_id = ?", (user_id,)).fetchone()
+
+    def update_thread(self, user_id: int, **fields: Any) -> None:
+        fields = {k: v for k, v in fields.items() if k in self.THREAD_FIELDS}
+        if not fields:
+            return
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE support_threads SET {', '.join(f'{k} = ?' for k in fields)} WHERE user_id = ?",
+                (*fields.values(), user_id),
+            )
+
+    def bump_unread(self, user_id: int) -> int:
+        with self.conn:
+            self.conn.execute("UPDATE support_threads SET unread = unread + 1 WHERE user_id = ?", (user_id,))
+        return self.get_thread(user_id)["unread"]
+
+    def log_chat(
+        self, user_id: int, direction: str, kind: str = "text", text: str = "", file_id: str = "",
+        file_name: str = "", mime: str = "", size: int = 0, buttons: list | None = None,
+        admin_name: str = "", preview: str = "",
+    ) -> int:
+        """Записывает сообщение в журнал переписки и обновляет последнюю строку обращения."""
+        self.ensure_thread(user_id)
+        text = text[:4000]
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO chat_messages (user_id, direction, kind, text, file_id, file_name, mime,"
+                " size, buttons, admin_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (user_id, direction, kind, text, file_id, file_name[:200], mime, size,
+                 json.dumps(buttons, ensure_ascii=False) if buttons else "", admin_name, now_iso()),
+            )
+            self.conn.execute(
+                "UPDATE support_threads SET last_at = ?, last_text = ?, last_dir = ? WHERE user_id = ?",
+                (now_iso(), (preview or text)[:160], direction, user_id),
+            )
+        return cur.lastrowid
+
+    def chat_messages(self, user_id: int, after: int = 0, limit: int = 300) -> list[sqlite3.Row]:
+        """Сообщения клиента: after > 0 — только новее этого номера, иначе последние limit штук."""
+        if after:
+            return self.conn.execute(
+                "SELECT * FROM chat_messages WHERE user_id = ? AND id > ? ORDER BY id LIMIT ?",
+                (user_id, after, limit)).fetchall()
+        rows = self.conn.execute(
+            "SELECT * FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
+        return rows[::-1]
+
+    def get_chat_message(self, message_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM chat_messages WHERE id = ?", (message_id,)).fetchone()
+
+    def list_threads(self, only_open: bool = False, limit: int = 300) -> list[sqlite3.Row]:
+        where = " WHERE status = 'open' OR unread > 0" if only_open else ""
+        return self.conn.execute(
+            f"SELECT * FROM support_threads{where} ORDER BY COALESCE(last_at, created_at) DESC LIMIT ?",
+            (limit,)).fetchall()
+
+    def support_counts(self) -> dict[str, int]:
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN unread > 0 THEN 1 ELSE 0 END), 0) AS unread,"
+            " COALESCE(SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END), 0) AS open FROM support_threads"
+        ).fetchone()
+        return {"unread": row["unread"], "open": row["open"]}
+
+    def clear_chat(self, user_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM chat_messages WHERE user_id = ?", (user_id,))
+            self.conn.execute("DELETE FROM support_threads WHERE user_id = ?", (user_id,))
+
+    def reset_chats(self) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM chat_messages")
+            self.conn.execute("DELETE FROM support_threads")
+            self.conn.execute("DELETE FROM sqlite_sequence WHERE name = 'chat_messages'")
 
     # ---------- администраторы ----------
 

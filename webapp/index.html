@@ -225,6 +225,31 @@
   select.sel option { color: #111; }
   .reasons { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
 
+  /* Поддержка: чат с клиентом */
+  .chat { display: flex; flex-direction: column; gap: 8px; padding: 4px 0 90px; }
+  .day { align-self: center; margin: 10px 0 2px; padding: 3px 12px; border-radius: 99px; font-size: 12px; color: var(--muted); background: var(--card); }
+  .bub { max-width: 86%; padding: 9px 12px; border-radius: 16px; font-size: 15px; line-height: 1.4; white-space: pre-wrap; box-shadow: inset 0 0 0 1px var(--line); }
+  .bub .who { display: block; margin-bottom: 3px; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .bub .time { display: block; margin-top: 4px; font-size: 11px; color: var(--muted); text-align: right; }
+  .bub.in { align-self: flex-start; background: var(--card-strong); border-bottom-left-radius: 5px; }
+  .bub.bot { align-self: flex-end; background: rgba(255, 244, 214, .04); border-bottom-right-radius: 5px; color: var(--muted); }
+  .bub.admin { align-self: flex-end; color: #3a1f17; background: linear-gradient(180deg, #fff3b0, var(--gold)); border-bottom-right-radius: 5px; box-shadow: none; }
+  .bub.admin .who, .bub.admin .time { color: rgba(58, 31, 23, .65); }
+  .bub .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  .bub .chips span { padding: 2px 9px; border-radius: 99px; font-size: 12px; box-shadow: inset 0 0 0 1px var(--line); }
+  .file { display: flex; flex-direction: column; gap: 6px; margin: 4px 0; padding: 8px 10px; border-radius: 12px; background: rgba(0, 0, 0, .18); }
+  .bub.admin .file { background: rgba(58, 31, 23, .1); }
+  .file b { font-size: 14px; word-break: break-all; }
+  .file .row { gap: 8px; }
+  .file .mini { padding: 7px 12px; min-height: 0; width: auto; font-size: 13px; border-radius: 10px; }
+  .file img { width: 100%; border-radius: 10px; display: block; background: #fff; }
+  .compose { position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); background: linear-gradient(180deg, transparent, #2b1612 28%); }
+  .compose .cbar { display: flex; gap: 8px; align-items: flex-end; max-width: 480px; margin: 0 auto; }
+  .compose textarea { min-height: 46px; max-height: 120px; padding: 11px 14px; border-radius: 22px; flex: 1; }
+  .compose .btn { width: 46px; min-height: 46px; height: 46px; padding: 0; border-radius: 50%; flex: none; }
+  .compose .btn .ic { width: 20px; height: 20px; }
+  .compose .btn.primary { width: 46px; }
+
   #toast { position: fixed; left: 16px; right: 16px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 10;
     max-width: 448px; margin: 0 auto; padding: 13px 16px; border-radius: 14px; text-align: center; font-weight: 500;
     color: #2b1612; background: var(--cream); box-shadow: 0 12px 30px rgba(0, 0, 0, .4);
@@ -279,6 +304,8 @@
     bell: "M6 17V11a6 6 0 1 1 12 0v6l1.5 2h-15zM10 21h4",
     tag: "M3 12V4h8l9 9-8 8zM7.5 8.5h.01",
     receipt: "M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6M9 16h4",
+    chat: "M4 5h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9l-5 4V6a1 1 0 0 1 1-1zM8 9.5h8M8 12.5h5",
+    clip: "M20 11.5l-8 8a5 5 0 0 1-7-7l8.5-8.5a3.5 3.5 0 0 1 5 5L10 17.5a2 2 0 0 1-3-3l7.5-7.5",
     up: "M6 14l6-6 6 6",
     down: "M6 10l6 6 6-6"
   };
@@ -287,7 +314,7 @@
   }
   // Значок кнопки-действия: по её id или по атрибуту data-icon.
   var BUTTON_ICONS = {
-    topup: "plus",
+    topup: "plus", issue: "ticket", closeChat: "check", reopenChat: "refresh", clearChat: "trash", issueSend: "send",
     list: "list",
     submit: "ticket", again: "plus", home: "home", scan: "scan", "export": "download", send: "send",
     unscan: "undo", "delete": "trash", remove: "trash", upload: "upload", "default": "undo",
@@ -348,6 +375,7 @@
   // Если пользователь ушёл на другой экран, пока шёл запрос, его ответ уже не нужен: он не должен
   // перерисовать чужой экран. Такой ответ просто отбрасывается (keep = true — не отбрасывать).
   var renderSeq = 0;
+  var chatHook = null;   // обновить открытый чат, когда пришло уведомление о новом сообщении
   function guard(promise, seq, keep) {
     if (keep) return promise;
     var never = function () { return new Promise(function () {}); };
@@ -392,6 +420,7 @@
   function render() {
     var top = stack[stack.length - 1];
     renderSeq++;
+    chatHook = null;
     window.scrollTo(0, 0);
     try {
       if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide();
@@ -422,6 +451,7 @@
     if (can("new")) tiles += tile("new", "ticket", "Новый билет", "Выдать билет клиенту");
     if (can("new")) tiles += tile("import", "file", "Массовый залив", "Список из txt / docx через ИИ");
     tiles += tile("list", "list", "Список и поиск", can("payments") ? "Билеты и оплаты на проверку" : me.scoped ? "Билеты, выданные вами" : "Все билеты", "", can("payments") ? me.pending_payments : 0);
+    if (can("support")) tiles += tile("support", "chat", "Поддержка", "Чаты с клиентами", "", me.support_unread);
     if (can("stats")) tiles += tile("stats", "stats", "Статистика", "Выдано, прошло, выручка");
     if (me.is_main) tiles += tile("types", "tag", "Типы билетов", "Цены, количество, продажа в боте");
     if (can("admins")) tiles += tile("admins", "admins", "Админы", "Доступ и разрешения");
@@ -1024,6 +1054,178 @@
     });
   };
 
+  // ---------- поддержка: чаты с клиентами ----------
+
+  var KIND_ICON = { photo: "🖼", document: "📎", voice: "🎤", video: "🎬", audio: "🎵", sticker: "🙂", contact: "👤", location: "📍", button: "👆" };
+  function fileSize(n) { return n > 1048576 ? (n / 1048576).toFixed(1) + " МБ" : n > 1024 ? Math.round(n / 1024) + " КБ" : n ? n + " Б" : ""; }
+
+  views.support = function (params) {
+    params.filter = params.filter || "open";
+    app.innerHTML = header("Клиенты", "Поддержка") +
+      '<input id="q" type="search" placeholder="Имя, @ник или Telegram ID" autocomplete="off">' +
+      '<div class="pills" style="margin-top:12px" id="pills"><button type="button" class="pill' + (params.filter === "open" ? " on" : "") + '" data-f="open">Обращения</button>' +
+      '<button type="button" class="pill' + (params.filter === "all" ? " on" : "") + '" data-f="all">Все чаты</button></div><div class="list" id="items"><p class="loading">Загрузка…</p></div>' +
+      '<p class="muted small" style="margin-top:14px">«Все чаты» — любой, кто писал боту: там вся переписка, в том числе покупки и чеки. Обращения — те, кто нажал «Поддержка» или кому написал оператор.</p>';
+    var input = $("#q"), timer, seq = 0;
+    input.value = params.query || "";
+    on("#pills .pill", "click", function () { params.filter = this.dataset.f; render(); });
+    function load() {
+      var mine = ++seq; params.query = input.value.trim();
+      api("support/threads", { filter: params.filter, query: params.query }).then(function (r) {
+        if (mine !== seq || !$("#items")) return;
+        me.support_unread = r.counts.unread;
+        $("#items").innerHTML = r.threads.map(function (t) {
+          var chipHtml = t.unread ? '<span class="chip warn">' + t.unread + " нов.</span>" : t.status === "open" ? '<span class="chip ok">открыто</span>' : t.status === "closed" ? '<span class="chip wait">закрыто</span>' : "";
+          return '<button class="item" data-id="' + t.user_id + '"><div class="main"><b>' + esc(t.name) + (t.username ? ' <span class="muted small">@' + esc(t.username) + "</span>" : "") + "</b><span>" +
+            (t.last_dir === "in" ? "" : "↩ ") + esc(t.last_text || "—") + (t.last_at ? " · " + esc(t.last_at) : "") + (t.assigned_to ? " · ведёт: " + esc(t.assigned_to) : "") + "</span></div>" + chipHtml + ic("chevron") + "</button>";
+        }).join("") || '<p class="loading">' + (params.query ? "Ничего не найдено" : params.filter === "open" ? "Новых обращений нет" : "Чатов пока нет") + "</p>";
+        on(".item", "click", function () { go("chat", { userId: Number(this.dataset.id) }); });
+      }).catch(function (error) { if ($("#items")) { $("#items").innerHTML = ""; failed(error); } });
+    }
+    input.addEventListener("input", function () { clearTimeout(timer); timer = setTimeout(load, 300); });
+    load();
+  };
+
+  views.chat = function (params) {
+    loading("Чат с клиентом", "Загрузка");
+    api("support/thread", { user_id: params.userId }).then(function (r) { showChat(params, r); }).catch(failed);
+  };
+
+  function bubble(m) {
+    var who = m.direction === "in" ? "Клиент" : m.direction === "admin" ? "Поддержка · " + esc(m.admin_name) : "Бот";
+    var file = "";
+    if (m.file) {
+      file = '<div class="file"><b>' + (KIND_ICON[m.kind] || "📎") + " " + esc(m.file.name || { photo: "Фото", voice: "Голосовое сообщение", video: "Видео", audio: "Аудио", sticker: "Стикер" }[m.kind] || "Файл") +
+        (m.file.size ? ' <span class="muted small">' + fileSize(m.file.size) + "</span>" : "") + '</b><div class="row">' +
+        (m.file.preview ? '<button type="button" class="btn mini" data-act="show" data-id="' + m.id + '">Показать</button>' : "") +
+        '<button type="button" class="btn mini" data-act="me" data-id="' + m.id + '">Прислать мне</button></div></div>';
+    }
+    var chips = m.buttons.length ? '<div class="chips">' + m.buttons.map(function (b) { return "<span>" + esc(b) + "</span>"; }).join("") + "</div>" : "";
+    var text = m.kind === "button" ? "<i>" + esc(m.text) + "</i>" : esc(m.text);
+    return '<div class="bub ' + m.direction + '" id="m' + m.id + '"><span class="who">' + who + "</span>" + file + text + chips + '<span class="time">' + esc(m.time) + "</span></div>";
+  }
+
+  function showChat(params, r) {
+    var t = r.thread, lastId = 0, lastDay = "", busy = false;
+    app.innerHTML = header("Чат с клиентом", t.name) +
+      '<p class="muted small" style="margin:-8px 0 12px">' + (t.username ? "@" + esc(t.username) + " · " : "") + "ID " + t.user_id + " · " + (t.status === "open" ? "обращение открыто" : t.status === "closed" ? "обращение закрыто" : "обычный покупатель") + "</p>" +
+      (r.busy ? '<div class="card warn"><p class="muted" style="margin:0">Сейчас этот чат ведёт ' + esc(t.assigned_to) + " — не пишите клиенту одновременно.</p></div>" : "") +
+      '<div class="row" style="margin-bottom:10px">' + (can("new") ? '<button class="btn" id="issue">Выдать билет</button>' : "") +
+      '<button class="btn" id="' + (t.status === "closed" ? "reopenChat" : "closeChat") + '">' + (t.status === "closed" ? "Открыть снова" : "Закрыть обращение") + "</button></div>" +
+      (r.orders.length ? '<div class="pills">' + r.orders.map(function (o) {
+        return '<button type="button" class="pill" data-order="' + o.id + '">№' + o.id + " · " + esc(o.type_title) + " · " + esc({ topup: "доплата", pending: "на проверке", approved: "принят" + (o.ticket_code ? " " + esc(o.ticket_code) : ""), rejected: "отклонён" }[o.status]) + "</button>";
+      }).join("") + "</div>" : "") +
+      (me.is_main ? '<button class="btn danger" id="clearChat" style="margin-bottom:6px">Очистить переписку</button>' : "") +
+      '<div class="chat" id="chat"></div>' +
+      '<div class="compose"><input type="file" id="attach" hidden><div class="cbar"><button type="button" class="btn" id="attachBtn" aria-label="Прикрепить файл">' + ic("clip") + '</button>' +
+      '<textarea id="msg" rows="1" placeholder="Сообщение клиенту от имени бота" maxlength="3500"></textarea><button type="button" class="btn primary" id="chatSend" aria-label="Отправить">' + ic("send") + "</button></div></div>";
+
+    function append(list) {
+      var box = $("#chat"); if (!box || !list.length) return;
+      var nearEnd = window.innerHeight + window.scrollY > document.body.scrollHeight - 160;
+      var html = "";
+      list.forEach(function (m) {
+        if (m.day !== lastDay) { lastDay = m.day; html += '<span class="day">' + esc(m.day) + "</span>"; }
+        html += bubble(m); lastId = m.id;
+      });
+      box.insertAdjacentHTML("beforeend", html);
+      list.forEach(function (m) {   // фото клиента показываем сразу, остальное — по кнопке
+        if (m.file && m.kind === "photo" && m.direction === "in") showFile(m.id);
+      });
+      if (nearEnd || !box.dataset.ready) window.scrollTo(0, document.body.scrollHeight);
+      box.dataset.ready = "1";
+    }
+    function poll() {
+      if (!$("#chat") || stack[stack.length - 1].params !== params) return;
+      api("support/messages", { user_id: t.user_id, after: lastId }).then(function (d) { append(d.messages); }).catch(function () {});
+    }
+    function showFile(id) {
+      var holder = document.querySelector("#m" + id + " .file"); if (!holder || holder.querySelector("img")) return;
+      apiImage("support/file", { id: id }).then(function (url) {
+        var h = document.querySelector("#m" + id + " .file");
+        if (h) { var b = h.querySelector('[data-act="show"]'); if (b) b.remove(); h.insertAdjacentHTML("beforeend", '<img alt="">'); h.querySelector("img").src = url; }
+      }).catch(function (e) { toast(e.message, true); });
+    }
+    append(r.messages);
+    chatHook = poll;
+    var timer = setInterval(function () { if (!$("#chat") || stack[stack.length - 1].params !== params) return clearInterval(timer); poll(); }, 4000);
+
+    $("#chat").addEventListener("click", function (event) {
+      var b = event.target.closest("[data-act]"); if (!b) return;
+      var id = Number(b.dataset.id);
+      if (b.dataset.act === "show") return showFile(id);
+      run(b, function () { return api("support/file_to_me", { id: id }).then(function () { toast("Файл отправлен вам в чат с ботом"); }); });
+    });
+    function send() {
+      var box = $("#msg"), text = box.value.trim(); if (!text) return;
+      run($("#chatSend"), function () {
+        return api("support/send", { user_id: t.user_id, text: text }).then(function () { box.value = ""; box.style.height = ""; poll(); });
+      });
+    }
+    $("#chatSend").addEventListener("click", send);
+    $("#msg").addEventListener("input", function () { this.style.height = "auto"; this.style.height = Math.min(this.scrollHeight, 120) + "px"; });
+    $("#attachBtn").addEventListener("click", function () { $("#attach").click(); });
+    $("#attach").addEventListener("change", function () {
+      var file = this.files[0]; this.value = ""; if (!file) return;
+      var caption = $("#msg").value.trim();
+      run($("#attachBtn"), function () {
+        return request("support/send_file?user_id=" + t.user_id + "&name=" + encodeURIComponent(file.name) + "&caption=" + encodeURIComponent(caption), { body: file }).then(function (response) {
+          return response.json().then(function (d) {
+            if (!response.ok) throw new Error(d.error || "Не удалось отправить файл");
+            $("#msg").value = ""; toast("Файл отправлен клиенту"); poll();
+          });
+        });
+      });
+    });
+    on("[data-order]", "click", function () { if (can("payments")) go("payment", { id: Number(this.dataset.order) }); });
+    on("#issue", "click", function () { go("issue", { userId: t.user_id, prefill: r.prefill, name: t.name }); });
+    on("#closeChat", "click", function () {
+      var button = this;
+      confirmBox("Закрыть обращение? Клиент получит сообщение об этом.").then(function (yes) {
+        if (yes) run(button, function () { return api("support/close", { user_id: t.user_id }).then(function () { toast("Обращение закрыто"); render(); }); });
+      });
+    });
+    on("#reopenChat", "click", function () { run(this, function () { return api("support/close", { user_id: t.user_id, reopen: true }).then(function () { render(); }); }); });
+    on("#clearChat", "click", function () {
+      var button = this;
+      confirmBox("Удалить всю переписку с этим клиентом из журнала? Отменить нельзя.").then(function (yes) {
+        if (yes) run(button, function () { return api("support/clear", { user_id: t.user_id }).then(function () { toast("Переписка удалена"); back(); }); });
+      });
+    });
+  }
+
+  views.issue = function (params) {
+    var p = params.prefill || {}, count = 1;
+    app.innerHTML = header("Выдать билет", params.name || "Клиент") +
+      '<p class="muted small" style="margin:-8px 0 12px">Билет придёт клиенту в чат с ботом.</p><form id="issueForm">' +
+      field("full_name", "Фамилия и имя", "text", "Иванов Иван") + field("group", "Группа", "text", "ИС-21", true) + field("university", "Университет", "text", "", true) + field("phone", "Телефон", "tel", "+7 707 123 45 67", true) +
+      '<div id="typeBox"></div><label class="field"><span>Количество билетов</span><div class="stepper"><button type="button" id="minus">' + ic("minus") + '</button><output id="count">1</output><button type="button" id="plus">' + ic("plus") + "</button></div></label>" +
+      '<button class="btn primary" id="issueSend" type="submit">Выдать и отправить клиенту</button></form>';
+    $("#full_name").value = p.full_name || ""; $("#phone").value = p.phone || ""; $("#university").value = p.university || "";
+    function setCount(n) { count = Math.max(1, Math.min(me.max_tickets, n)); $("#count").textContent = count; }
+    $("#minus").addEventListener("click", function () { setCount(count - 1); });
+    $("#plus").addEventListener("click", function () { setCount(count + 1); });
+    api("types/list").then(function (r) {
+      if (!r.types.length || !$("#typeBox")) return;
+      $("#typeBox").innerHTML = '<label class="field"><span>Тип билета · необязательно</span><select class="sel" id="typeSel"><option value="">Без типа (общий дизайн)</option>' +
+        r.types.map(function (t) { return '<option value="' + t.id + '">' + esc(t.title) + " — " + esc(t.price_text) + (t.active ? "" : " (скрыт)") + "</option>"; }).join("") + "</select></label>";
+    }).catch(function () {});
+    $("#issueForm").addEventListener("submit", function (event) {
+      event.preventDefault();
+      var data = { user_id: params.userId, count: count };
+      ["full_name", "group", "university", "phone"].forEach(function (k) { data[k] = $("#" + k).value; });
+      if ($("#typeSel") && $("#typeSel").value) data.type_id = Number($("#typeSel").value);
+      run($("#issueSend"), function send() {
+        return api("support/issue", data).then(function (r) {
+          if (r.over_limit) {
+            return confirmBox("Билетов «" + r.over_limit.title + "» осталось только " + r.over_limit.left + ", а вы выдаёте " + count + ". Выдать сверх лимита?").then(function (yes) { if (yes) { data.force = true; return send(); } });
+          }
+          haptic("success"); toast(r.delivered ? "Билет отправлен клиенту" : "Билет создан, но не доставлен — клиент мог заблокировать бота", !r.delivered); back();
+        });
+      });
+    });
+  };
+
   // ---------- статистика ----------
 
   views.stats = function () {
@@ -1346,7 +1548,7 @@
       app.innerHTML = header("Опасная зона", "Сброс списка") +
         '<div class="card bad"><p class="verdict">Будут удалены все билеты и заказы</p><p class="muted">Билетов: ' + i.tickets + ", заказов в боте: " + i.orders +
         (i.pending ? ' (<b>из них ' + i.pending + " ждут проверки оплаты!</b>)" : "") + ". Все выданные QR-коды перестанут работать, нумерация начнётся заново, PDF-чеки клиентов удалятся. " +
-        "Типы билетов, цены и настройки останутся. Перед удалением бот пришлёт вам в чат резервную копию списка в TXT.</p></div>" +
+        "Переписка клиентов с ботом (чаты поддержки: " + i.chats + ") тоже удалится. Типы билетов, цены и настройки останутся. Перед удалением бот пришлёт вам в чат резервную копию списка в TXT.</p></div>" +
         '<button class="btn danger" id="reset">Удалить всё</button>';
       $("#reset").addEventListener("click", function () {
         var button = this;
@@ -1371,6 +1573,9 @@
 
   function handleEvent(ev) {
     if (ev.type === "notice") { toast(ev.text, !!ev.error); refreshMe(); }
+    else if (ev.type === "chat") {
+      if (chatHook) chatHook(); else { toast(ev.text); refreshMe(); }
+    }
   }
 
   var lastEvent = null;
@@ -1393,8 +1598,9 @@
   api("me").then(function (data) {
     me = data; home(); pollEvents();
     // Ссылка из уведомления об оплате открывает проверку сразу: ?pay=<номер заказа>
-    var pay = Number(new URLSearchParams(location.search).get("pay"));
+    var qs = new URLSearchParams(location.search), pay = Number(qs.get("pay")), chatId = Number(qs.get("chat"));
     if (pay && can("payments")) go("payment", { id: pay });
+    else if (chatId && can("support")) go("chat", { userId: chatId });
   }).catch(function (error) {
     app.innerHTML = header("Билеты", "Нет доступа") + '<div class="card bad"><p>' + esc(error.message) + "</p></div>";
   });

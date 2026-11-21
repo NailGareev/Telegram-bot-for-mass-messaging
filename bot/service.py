@@ -15,7 +15,7 @@ from aiogram.types import (
     WebAppInfo,
 )
 
-from . import ai, ui
+from . import ai, support, ui
 
 from .access import Access, resolve_access
 from .config import DEFAULT_BOX, DEFAULT_NAME, DEFAULT_TEMPLATE, Config
@@ -157,6 +157,11 @@ class AccessMiddleware(BaseMiddleware):
             return None
         db, config = data["db"], data["config"]
         data["access"] = resolve_access(user, db, config)
+        if data["access"] is None:   # клиент: его переписка с ботом пишется в журнал для поддержки
+            try:
+                support.log_incoming(db, config, event)
+            except Exception:
+                log.exception("Не удалось записать сообщение клиента в журнал")
         data["screen"] = Screen(data["bot"], db, message.chat.id)
         return await handler(event, data)
 

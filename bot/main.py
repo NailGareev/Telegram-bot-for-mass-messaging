@@ -13,7 +13,7 @@ from aiohttp import web
 
 from .config import BASE_DIR, Config, load_config
 from .db import Database
-from . import ai, ui
+from . import ai, support, ui
 from .handlers import fallback, shop, update
 from . import updater
 from .service import AccessMiddleware, sync_menu_button
@@ -109,6 +109,7 @@ async def run() -> bool:
     db = Database(config.db_path)
     ai.bind(db)   # найденная рабочая модель Groq запоминается в базе
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot.session.middleware(support.ChatLogMiddleware(db, config))   # журнал ответов бота клиентам
     me = await bot.get_me()
     await bot.set_my_commands(
         [

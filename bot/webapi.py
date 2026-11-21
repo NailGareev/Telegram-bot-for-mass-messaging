@@ -15,6 +15,8 @@ import shutil
 import time
 import zipfile
 from collections import Counter
+from datetime import datetime
+from html import escape
 from pathlib import Path
 
 from aiogram import Bot
@@ -26,9 +28,9 @@ from PIL import Image, UnidentifiedImageError
 
 from .access import DEFAULT_PERMS, PERMS, Access, dump_perms, parse_perms, resolve_access
 from .config import BASE_DIR, Config
-from .db import Database
+from .db import Database, now_iso
 from .importer import MAX_TICKETS_AT_ONCE, clean, normalize_phone
-from . import ai, importer, receipts, shop
+from . import ai, importer, receipts, shop, support
 from .events import Hub
 from .imaging import (
     ALIGNS, clamp_box, clamp_name_box, decode_qr, extract_token, image_size, save_template,
@@ -102,6 +104,16 @@ class WebApi:
             "payments/receipt": self.payments_receipt,
             "payments/receipt_file": self.payments_receipt_file,
             "payments/topup": self.payments_topup,
+            "support/threads": self.support_threads,
+            "support/thread": self.support_thread,
+            "support/messages": self.support_messages,
+            "support/send": self.support_send,
+            "support/send_file": self.support_send_file,
+            "support/file": self.support_file,
+            "support/file_to_me": self.support_file_to_me,
+            "support/close": self.support_close,
+            "support/issue": self.support_issue,
+            "support/clear": self.support_clear,
             "payments/approve": self.payments_approve,
             "payments/reject": self.payments_reject,
             "payments/resend": self.payments_resend,
@@ -184,6 +196,7 @@ class WebApi:
             "scoped": access.tickets_owner is not None,
             "max_tickets": MAX_TICKETS_AT_ONCE,
             "pending_payments": self.db.order_counts().get("pending", 0) if access.can("payments") else 0,
+            "support_unread": self.db.support_counts()["unread"] if access.can("support") else 0,
         })
 
     # ---------- билеты ----------
@@ -1096,6 +1109,289 @@ class WebApi:
             "delivered": delivered, "order": self.order_json(self.db.get_order(order["id"]), detail=True),
         })
 
+    # ---------- поддержка: чаты с клиентами ----------
+
+    def thread_json(self, t) -> dict:
+        return {
+            "user_id": t["user_id"], "name": t["name"] or "Без имени", "username": t["username"] or "",
+            "status": t["status"], "unread": t["unread"], "assigned_to": t["assigned_to"],
+            "last_text": t["last_text"], "last_dir": t["last_dir"],
+            "last_at": fmt_dt(t["last_at"], self.config) if t["last_at"] else "",
+        }
+
+    def message_json(self, m) -> dict:
+        previewable = bool(m["file_id"]) and (
+            m["kind"] == "photo" or (m["mime"] or "").startswith("image/")
+            or (m["mime"] == "application/pdf") or (m["file_name"] or "").lower().endswith(".pdf")
+        )
+        return {
+            "id": m["id"], "direction": m["direction"], "kind": m["kind"], "text": m["text"],
+            "admin_name": m["admin_name"], "time": fmt_dt(m["created_at"], self.config),
+            "day": fmt_dt(m["created_at"], self.config)[:10],
+            "buttons": json.loads(m["buttons"]) if m["buttons"] else [],
+            "file": {
+                "name": m["file_name"], "mime": m["mime"], "size": m["size"], "preview": previewable,
+            } if m["file_id"] else None,
+        }
+
+    def client_thread(self, data: dict):
+        try:
+            thread = self.db.get_thread(int(data.get("user_id")))
+        except (TypeError, ValueError):
+            thread = None
+        if not thread:
+            raise ApiError("Чат не найден", 404)
+        return thread
+
+    def client_profile(self, thread) -> dict:
+        """Данные клиента для выдачи билета и список его заказов."""
+        orders = [o for o in self.db.orders_of_user(thread["user_id"], 10)]
+        latest = next((o for o in orders if o["full_name"]), None)
+        return {
+            "prefill": {
+                "full_name": latest["full_name"] if latest else thread["name"],
+                "phone": latest["phone"] if latest else "",
+                "university": latest["university"] if latest else "",
+            },
+            "orders": [
+                {"id": o["id"], "status": o["status"], "type_title": o["type_title"], "price_text": money(o["price"]),
+                 "ticket_code": ticket_code(self.config, o["ticket_id"]) if o["ticket_id"] else ""}
+                for o in orders
+            ],
+        }
+
+    async def support_threads(self, request: web.Request) -> web.Response:
+        self.need(request, "support")
+        data = await self.body(request)
+        threads = self.db.list_threads(only_open=data.get("filter") != "all")
+        query = str(data.get("query", "")).strip().casefold()
+        if query:
+            threads = [
+                t for t in self.db.list_threads()
+                if query in (t["name"] or "").casefold() or query in (t["username"] or "").casefold()
+                or query == str(t["user_id"])
+            ]
+        counts = self.db.support_counts()
+        return web.json_response({"threads": [self.thread_json(t) for t in threads], "counts": counts})
+
+    async def support_thread(self, request: web.Request) -> web.Response:
+        """Открывает чат с клиентом: помечает прочитанным, закрепляет за админом, отдаёт историю."""
+        self.need(request, "support")
+        thread = self.client_thread(await self.body(request))
+        admin = request["user"].full_name
+        fresh = (
+            thread["assigned_at"] and (time.time() - datetime.fromisoformat(thread["assigned_at"]).timestamp()) < 1800
+        )
+        self.db.update_thread(
+            thread["user_id"], unread=0, notified=0,
+            **({} if thread["assigned_to"] == admin or (thread["assigned_to"] and fresh) else {"assigned_to": admin, "assigned_at": now_iso()}),
+        )
+        thread = self.db.get_thread(thread["user_id"])
+        messages = self.db.chat_messages(thread["user_id"])
+        return web.json_response({
+            "thread": self.thread_json(thread), "messages": [self.message_json(m) for m in messages],
+            "busy": bool(thread["assigned_to"] and thread["assigned_to"] != admin and fresh),
+            **self.client_profile(thread),
+        })
+
+    async def support_messages(self, request: web.Request) -> web.Response:
+        self.need(request, "support")
+        data = await self.body(request)
+        thread = self.client_thread(data)
+        try:
+            after = int(data.get("after") or 0)
+        except (TypeError, ValueError):
+            after = 0
+        new = self.db.chat_messages(thread["user_id"], after=after)
+        if thread["unread"] or thread["notified"]:   # админ смотрит чат — новое сразу считается прочитанным
+            self.db.update_thread(thread["user_id"], unread=0, notified=0)
+        return web.json_response({"messages": [self.message_json(m) for m in new]})
+
+    def clean_client(self, thread) -> int:
+        if support.is_staff(self.db, self.config, thread["user_id"]):
+            raise ApiError("Это администратор, а не клиент", 400)
+        return thread["user_id"]
+
+    async def support_send(self, request: web.Request) -> web.Response:
+        """Сообщение клиенту от лица бота."""
+        self.need(request, "support")
+        data = await self.body(request)
+        thread = self.client_thread(data)
+        user_id = self.clean_client(thread)
+        text = str(data.get("text", "")).strip()
+        if not text or len(text) > 3500:
+            raise ApiError("Введите сообщение (до 3500 символов)")
+        admin = request["user"].full_name
+        try:
+            await support.as_operator(admin, lambda: self.bot.send_message(
+                user_id, "👨‍💻 <b>Поддержка:</b>\n" + escape(text)))
+        except TelegramAPIError:
+            raise ApiError("Не удалось отправить: клиент заблокировал бота или недоступен", 502)
+        self.db.update_thread(user_id, status="open", unread=0, assigned_to=admin, assigned_at=now_iso())
+        return web.json_response({"ok": True})
+
+    async def support_send_file(self, request: web.Request) -> web.Response:
+        """Файл или фото клиенту от лица бота (тело запроса — сам файл)."""
+        self.need(request, "support")
+        thread = self.client_thread({"user_id": request.query.get("user_id")})
+        user_id = self.clean_client(thread)
+        raw = await request.read()
+        if not raw:
+            raise ApiError("Файл пустой")
+        if len(raw) > 20 * 1024 * 1024:
+            raise ApiError("Файл больше 20 МБ")
+        name = (request.query.get("name") or "file")[:100]
+        caption = str(request.query.get("caption", "")).strip()[:900]
+        mime = request.content_type or ""
+        file = BufferedInputFile(raw, filename=name)
+        admin = request["user"].full_name
+        cap = ("👨‍💻 <b>Поддержка:</b>\n" + escape(caption)) if caption else "👨‍💻 Поддержка"
+        as_photo = mime in ("image/jpeg", "image/png", "image/webp") and len(raw) <= 10 * 1024 * 1024
+        try:
+            if as_photo:
+                await support.as_operator(admin, lambda: self.bot.send_photo(user_id, file, caption=cap))
+            else:
+                await support.as_operator(admin, lambda: self.bot.send_document(user_id, file, caption=cap))
+        except TelegramAPIError:
+            raise ApiError("Не удалось отправить: клиент заблокировал бота или недоступен", 502)
+        self.db.update_thread(user_id, status="open", unread=0, assigned_to=admin, assigned_at=now_iso())
+        return web.json_response({"ok": True})
+
+    def file_message(self, data: dict):
+        try:
+            m = self.db.get_chat_message(int(data.get("id")))
+        except (TypeError, ValueError):
+            m = None
+        if not m or not m["file_id"]:
+            raise ApiError("Файл не найден", 404)
+        return m
+
+    async def support_file(self, request: web.Request) -> web.Response:
+        """Предпросмотр файла клиента: фото — картинкой, PDF — первая страница (внутри Telegram они не открываются)."""
+        self.need(request, "support")
+        data = await self.body(request)
+        m = self.file_message(data)
+        buf = io.BytesIO()
+        try:
+            await self.bot.download(m["file_id"], destination=buf)
+        except TelegramAPIError:
+            raise ApiError("Telegram не отдаёт этот файл (слишком большой или устарел). Используйте «Прислать мне».", 502)
+        raw = buf.getvalue()
+        if raw[:5] == b"%PDF-":
+            try:
+                jpeg = await asyncio.to_thread(receipts.render_page, raw, int(data.get("page") or 0))
+            except receipts.ReceiptError as e:
+                raise ApiError(str(e))
+            return web.Response(body=jpeg, content_type="image/jpeg")
+        try:
+            def to_jpeg() -> bytes:
+                with Image.open(io.BytesIO(raw)) as src:
+                    img = Image.new("RGB", src.size, "white")
+                    img.paste(src.convert("RGBA"), mask=src.convert("RGBA").getchannel("A"))
+                img.thumbnail((1600, 1600), Image.LANCZOS)
+                out = io.BytesIO()
+                img.save(out, format="JPEG", quality=85)
+                return out.getvalue()
+            jpeg = await asyncio.to_thread(to_jpeg)
+        except (UnidentifiedImageError, OSError):
+            raise ApiError("Предпросмотр недоступен для этого файла", 415)
+        return web.Response(body=jpeg, content_type="image/jpeg")
+
+    async def support_file_to_me(self, request: web.Request) -> web.Response:
+        """Присылает файл клиента админу в чат (по file_id — работает и для больших файлов)."""
+        self.need(request, "support")
+        m = self.file_message(await self.body(request))
+        thread = self.db.get_thread(m["user_id"])
+        who = (thread["name"] if thread else "") or str(m["user_id"])
+        caption = f"Файл из чата с клиентом {who}" + (f"\n{m['text']}" if m["text"] else "")
+        sender = {
+            "photo": self.bot.send_photo, "voice": self.bot.send_voice, "video": self.bot.send_video,
+            "audio": self.bot.send_audio, "sticker": self.bot.send_sticker,
+        }.get(m["kind"], self.bot.send_document)
+        try:
+            if m["kind"] == "sticker":
+                await sender(request["user"].id, m["file_id"])
+            else:
+                await sender(request["user"].id, m["file_id"], caption=caption[:1000])
+        except TelegramAPIError:
+            raise ApiError("Telegram не смог переслать этот файл", 502)
+        return web.json_response({"sent": True})
+
+    async def support_close(self, request: web.Request) -> web.Response:
+        self.need(request, "support")
+        data = await self.body(request)
+        thread = self.client_thread(data)
+        user_id = self.clean_client(thread)
+        if data.get("reopen"):
+            self.db.update_thread(user_id, status="open")
+        else:
+            self.db.update_thread(user_id, status="closed", talking=0, unread=0, notified=0, assigned_to="")
+            if data.get("notify", True):
+                try:
+                    await support.as_operator(request["user"].full_name, lambda: self.bot.send_message(
+                        user_id, "✅ Обращение закрыто. Если появятся вопросы — нажмите /start и «🆘 Поддержка»."))
+                except TelegramAPIError:
+                    pass
+        return web.json_response({"thread": self.thread_json(self.db.get_thread(user_id))})
+
+    async def support_issue(self, request: web.Request) -> web.Response:
+        """Выдаёт билет клиенту прямо из чата: он приходит ему в чат от бота."""
+        access = self.need(request, "support")
+        if not access.can("new"):
+            raise ApiError("Для выдачи билета нужно разрешение «Новый билет»", 403)
+        data = await self.body(request)
+        thread = self.client_thread(data)
+        user_id = self.clean_client(thread)
+        full_name = clean(str(data.get("full_name", "")))
+        if not full_name:
+            raise ApiError("Введите фамилию и имя")
+        raw_phone = str(data.get("phone", "")).strip()
+        phone = normalize_phone(raw_phone) if raw_phone else ""
+        if raw_phone and not phone:
+            raise ApiError("Не похоже на номер телефона")
+        try:
+            count = int(data.get("count", 1))
+        except (TypeError, ValueError):
+            count = 0
+        if not 1 <= count <= MAX_TICKETS_AT_ONCE:
+            raise ApiError(f"Количество билетов — от 1 до {MAX_TICKETS_AT_ONCE}")
+        type_row = None
+        if data.get("type_id"):
+            type_row = self.db.get_type(int(data["type_id"]))
+            if not type_row:
+                raise ApiError("Тип билета не найден", 404)
+            left = self.db.type_left(type_row["id"])
+            if left is not None and left < count and not data.get("force"):
+                return web.json_response({"over_limit": {"left": left, "title": type_row["title"]}})
+        user: User = request["user"]
+        tickets = [
+            self.db.create_ticket(
+                full_name, clean(str(data.get("group", ""))), clean(str(data.get("university", ""))), phone,
+                user.id, user.full_name, type_row["id"] if type_row else None, type_row["title"] if type_row else "",
+            )
+            for _ in range(count)
+        ]
+        delivered = True
+        try:
+            for n, t in enumerate(tickets, 1):
+                head = "🎟 Вам выдан билет" if count == 1 else f"🎟 Вам выдан билет {n} из {count}"
+                file = await ticket_file(t, self.db, self.config, self.bot_username)
+                await support.as_operator(user.full_name, lambda: self.bot.send_document(
+                    user_id, file, caption=f"{head}\n\n" + client_block(t, self.config)))
+        except TelegramAPIError:
+            delivered = False
+        self.db.update_thread(user_id, unread=0, assigned_to=user.full_name, assigned_at=now_iso())
+        return web.json_response({
+            "tickets": [self.ticket_json(t, access) for t in tickets], "delivered": delivered,
+        })
+
+    async def support_clear(self, request: web.Request) -> web.Response:
+        """Удаляет переписку с клиентом из журнала (только главный админ)."""
+        self.need_main(request)
+        thread = self.client_thread(await self.body(request))
+        self.db.clear_chat(thread["user_id"])
+        return web.json_response({"cleared": True})
+
     # ---------- настройки (только главный администратор) ----------
 
     def settings_payload(self) -> dict:
@@ -1181,6 +1477,7 @@ class WebApi:
             "tickets": len(self.db.all_tickets()),
             "orders": sum(counts.values()),
             "pending": counts.get("pending", 0),
+            "chats": len(self.db.list_threads()),
         })
 
     async def reset(self, request: web.Request) -> web.Response:
@@ -1195,4 +1492,5 @@ class WebApi:
             )
         for name in self.db.reset_orders():
             (self.config.receipts_dir / name).unlink(missing_ok=True)
+        self.db.reset_chats()
         return web.json_response({"deleted": self.db.reset_tickets()})
