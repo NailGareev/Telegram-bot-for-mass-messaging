@@ -14,6 +14,7 @@ PERMS = {
     "new": "Новый билет",
     "scan": "Сканировать",
     "list": "Список и поиск (все билеты)",
+    "payments": "Проверка оплат",
     "stats": "Статистика",
     "admins": "Админы",
     "design": "Дизайн билета",
@@ -62,5 +63,5 @@ def resolve_access(user: User, db: Database, config: Config) -> Access | None:
 class IsMain(BaseFilter):
     """Пропускает только главных администраторов."""
 
-    async def __call__(self, event: TelegramObject, access: Access) -> bool:
-        return access.is_main
+    async def __call__(self, event: TelegramObject, access: Access | None) -> bool:
+        return access is not None and access.is_main

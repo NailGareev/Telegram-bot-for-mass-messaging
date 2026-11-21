@@ -14,7 +14,7 @@ from aiohttp import web
 from .config import BASE_DIR, Config, load_config
 from .db import Database
 from . import ai, ui
-from .handlers import fallback, update
+from .handlers import fallback, shop, update
 from . import updater
 from .service import AccessMiddleware, sync_menu_button
 from .events import Hub
@@ -85,13 +85,13 @@ def build_dispatcher(
         db=db, config=config, bot_username=bot_username, hub=hub or Hub(),
         restarter=restarter or updater.Restarter(),
     )
-    # Доступ только у администраторов и только в личных сообщениях:
-    # всем остальным бот ничего не отвечает.
+    # Бот работает только в личных сообщениях. Middleware определяет, администратор ли пишет:
+    # админы управляют через приложение, клиенты покупают билеты в магазине.
     access = AccessMiddleware()
     dp.message.outer_middleware(access)
     dp.callback_query.outer_middleware(access)
-    # Порядок важен: сначала обновление проекта, затем «всё остальное» (подсказка про приложение)
-    dp.include_routers(update.router, fallback.router)
+    # Порядок важен: обновление проекта, магазин для клиентов, затем подсказка админам
+    dp.include_routers(update.router, shop.router, fallback.router)
     return dp
 
 

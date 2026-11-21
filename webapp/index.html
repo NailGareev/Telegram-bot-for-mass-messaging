@@ -203,6 +203,28 @@
   .stickybar { position: sticky; bottom: 0; margin: 0 -16px -28px; padding: 12px 16px calc(14px + env(safe-area-inset-bottom));
     background: linear-gradient(180deg, transparent, #2b1612 32%); }
 
+  /* Магазин: оплаты и типы билетов */
+  .tile { position: relative; }
+  .dot { position: absolute; top: 10px; right: 10px; min-width: 24px; height: 24px; padding: 0 7px; border-radius: 99px; display: grid; place-items: center;
+    font-size: 13px; font-weight: 700; color: #4a1b10; background: var(--warn); box-shadow: 0 4px 12px rgba(0, 0, 0, .3); }
+  .tabs { margin-bottom: 14px; }
+  .tabs .btn { min-height: 46px; font-size: 15px; }
+  .pills { display: flex; gap: 8px; margin: 0 0 12px; overflow-x: auto; }
+  .pill { flex: none; padding: 8px 14px; border: 1.5px solid var(--line); border-radius: 999px; background: none; font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer; }
+  .pill.on { color: #3a1f17; background: var(--gold); border-color: var(--gold); }
+  .flag { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; font-size: 14px; border-bottom: 1px solid var(--line); }
+  .flag:last-child { border-bottom: 0; }
+  .flag i { flex: none; width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; background: var(--ok); }
+  .flag.warn i { background: var(--warn); } .flag.bad i { background: var(--bad); }
+  .receipt { display: block; width: 100%; max-height: 70vh; object-fit: contain; border-radius: 14px; background: #fff; box-shadow: 0 0 0 1px var(--line); margin-bottom: 14px; min-height: 80px; }
+  textarea { width: 100%; min-height: 88px; padding: 12px 16px; border: 0; border-radius: 16px; font-size: 16px; outline: none; resize: vertical;
+    background: var(--card); box-shadow: inset 0 0 0 1px var(--line); color: var(--text); font-family: inherit; }
+  textarea:focus { box-shadow: inset 0 0 0 1.5px var(--gold); }
+  select.sel { width: 100%; height: 52px; padding: 0 14px; border: 0; border-radius: 16px; font-size: 16px; outline: none; color: var(--text);
+    background: var(--card); box-shadow: inset 0 0 0 1px var(--line); }
+  select.sel option { color: #111; }
+  .reasons { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+
   #toast { position: fixed; left: 16px; right: 16px; bottom: calc(18px + env(safe-area-inset-bottom)); z-index: 10;
     max-width: 448px; margin: 0 auto; padding: 13px 16px; border-radius: 14px; text-align: center; font-weight: 500;
     color: #2b1612; background: var(--cream); box-shadow: 0 12px 30px rgba(0, 0, 0, .4);
@@ -254,7 +276,11 @@
     chevron: "M9 6l6 6-6 6",
     file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M9 13h6M9 17h6M9 9h2",
     image: "M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM4 16l4.5-4.5a1.5 1.5 0 0 1 2 0L16 17M9 8.5h.01",
-    bell: "M6 17V11a6 6 0 1 1 12 0v6l1.5 2h-15zM10 21h4"
+    bell: "M6 17V11a6 6 0 1 1 12 0v6l1.5 2h-15zM10 21h4",
+    tag: "M3 12V4h8l9 9-8 8zM7.5 8.5h.01",
+    receipt: "M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6M9 16h4",
+    up: "M6 14l6-6 6 6",
+    down: "M6 10l6 6 6-6"
   };
   function ic(name) {
     return '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="' + ICONS[name] + '"/></svg>';
@@ -264,7 +290,7 @@
     list: "list",
     submit: "ticket", again: "plus", home: "home", scan: "scan", "export": "download", send: "send",
     unscan: "undo", "delete": "trash", remove: "trash", upload: "upload", "default": "undo",
-    aiCheck: "refresh", save: "check", cancel: "close", groqDel: "trash", reset: "trash", photo: "image",
+    aiCheck: "refresh", approve: "check", reject: "close", pdf: "file", resend: "send", typeSave: "check", typeDel: "trash", typeDesign: "design", shopSave: "check", save: "check", cancel: "close", groqDel: "trash", reset: "trash", photo: "image",
     pick: "file", dismiss: "check", createImport: "ticket", other: "file"
   };
   function decorate() {
@@ -318,23 +344,36 @@
       throw new Error("Нет связи с ботом. Проверьте, что он запущен.");
     });
   }
-  function api(path, body) {
-    return request(path, {
+  // Если пользователь ушёл на другой экран, пока шёл запрос, его ответ уже не нужен: он не должен
+  // перерисовать чужой экран. Такой ответ просто отбрасывается (keep = true — не отбрасывать).
+  var renderSeq = 0;
+  function guard(promise, seq, keep) {
+    if (keep) return promise;
+    var never = function () { return new Promise(function () {}); };
+    return promise.then(
+      function (value) { return seq === renderSeq ? value : never(); },
+      function (error) { return seq === renderSeq ? Promise.reject(error) : never(); }
+    );
+  }
+  function api(path, body, keep) {
+    var seq = renderSeq;
+    return guard(request(path, {
       headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
     }).then(function (response) {
       return response.json().catch(function () { return {}; }).then(function (data) {
         if (!response.ok) throw new Error(data.error || "Ошибка " + response.status);
         return data;
       });
-    });
+    }), seq, keep);
   }
   function apiImage(path, body) {
-    return request(path, {
+    var seq = renderSeq;
+    return guard(request(path, {
       headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}),
     }).then(function (response) {
       if (!response.ok) throw new Error("Не удалось загрузить картинку");
       return response.blob();
-    }).then(function (blob) { return URL.createObjectURL(blob); });
+    }).then(function (blob) { return URL.createObjectURL(blob); }), seq);
   }
 
   // Выполняет действие по кнопке: блокирует её на время запроса и показывает ошибки.
@@ -351,6 +390,7 @@
   var views = {};
   function render() {
     var top = stack[stack.length - 1];
+    renderSeq++;
     window.scrollTo(0, 0);
     try {
       if (stack.length > 1) tg.BackButton.show(); else tg.BackButton.hide();
@@ -375,24 +415,37 @@
 
   // ---------- главная ----------
 
-  views.home = function () {
+  function renderHome() {
     var tiles = "";
     if (can("scan")) tiles += tile("scan", "scan", "Сканировать", "Проверка билетов на входе", "primary wide");
     if (can("new")) tiles += tile("new", "ticket", "Новый билет", "Выдать билет клиенту");
     if (can("new")) tiles += tile("import", "file", "Массовый залив", "Список из txt / docx через ИИ");
-    tiles += tile("list", "list", "Список и поиск", me.scoped ? "Билеты, выданные вами" : "Все билеты");
-    if (can("stats")) tiles += tile("stats", "stats", "Статистика", "Сколько выдано и прошло");
+    tiles += tile("list", "list", "Список и поиск", can("payments") ? "Билеты и оплаты на проверку" : me.scoped ? "Билеты, выданные вами" : "Все билеты", "", can("payments") ? me.pending_payments : 0);
+    if (can("stats")) tiles += tile("stats", "stats", "Статистика", "Выдано, прошло, выручка");
+    if (me.is_main) tiles += tile("types", "tag", "Типы билетов", "Цены, количество, продажа в боте");
     if (can("admins")) tiles += tile("admins", "admins", "Админы", "Доступ и разрешения");
-    if (can("design")) tiles += tile("design", "design", "Дизайн билета", "Шаблон и место QR");
-    if (me.is_main) tiles += tile("settings", "settings", "Настройки", "Ключ ИИ и адрес сканера");
-    if (can("reset")) tiles += tile("reset", "trash", "Сброс списка", "Удалить все билеты", "danger");
+    if (can("design")) tiles += tile("design", "design", "Дизайн билета", "Шаблоны и место QR и ФИ");
+    if (me.is_main) tiles += tile("settings", "settings", "Настройки", "Ключ ИИ, Kaspi, магазин");
+    if (can("reset")) tiles += tile("reset", "trash", "Сброс списка", "Удалить билеты и заказы", "danger");
     app.innerHTML = header(me.is_main ? "Главный администратор" : "Администратор", "Здравствуйте, " + me.name) +
       '<div class="tiles">' + tiles + "</div>";
     on("[data-go]", "click", function () { go(this.dataset.go); });
+  }
+  views.home = function () {
+    renderHome();
+    refreshMe();
   };
-  function tile(name, icon, title, text, extra) {
+  // Права и число оплат на проверке могли измениться, пока приложение было открыто.
+  function refreshMe() {
+    return api("me", {}, true).then(function (data) {
+      var changed = JSON.stringify(data) !== JSON.stringify(me);
+      me = data;
+      if (changed && stack.length === 1 && stack[0].name === "home") renderHome();
+    }).catch(function () {});
+  }
+  function tile(name, icon, title, text, extra, count) {
     return '<button class="tile ' + (extra || "") + '" data-go="' + name + '"><span class="badge">' + ic(icon) +
-      "</span><span><b>" + title + "</b><small>" + text + "</small></span></button>";
+      "</span><span><b>" + title + "</b><small>" + text + "</small></span>" + (count ? '<span class="dot">' + count + "</span>" : "") + "</button>";
   }
 
   // ---------- новый билет ----------
@@ -405,6 +458,7 @@
       field("group", "Группа", "text", "ИС-21", true) +
       field("university", "Университет", "text", "", true) +
       field("phone", "Телефон", "tel", "+7 707 123 45 67", true) +
+      '<div id="typeBox"></div>' +
       '<label class="field"><span>Количество билетов на эти данные</span>' +
       '<div class="stepper"><button type="button" id="minus" aria-label="Меньше">' + ic("minus") + "</button>" +
       '<output id="count">1</output><button type="button" id="plus" aria-label="Больше">' + ic("plus") + "</button></div></label>" +
@@ -416,15 +470,27 @@
     }
     $("#minus").addEventListener("click", function () { setCount(count - 1); });
     $("#plus").addEventListener("click", function () { setCount(count + 1); });
+    // Тип билета (если типы заведены): от него зависят дизайн билета и счётчик проданных
+    api("types/list").then(function (r) {
+      if (!r.types.length || !$("#typeBox")) return;
+      $("#typeBox").innerHTML = '<label class="field"><span>Тип билета · необязательно</span><select class="sel" id="typeSel"><option value="">Без типа (общий дизайн)</option>' +
+        r.types.map(function (t) { return '<option value="' + t.id + '">' + esc(t.title) + " — " + esc(t.price_text) + (t.active ? "" : " (скрыт)") + "</option>"; }).join("") + "</select></label>";
+    }).catch(function () {});
     $("#form").addEventListener("submit", function (event) {
       event.preventDefault();
       var data = { count: count };
+      if ($("#typeSel") && $("#typeSel").value) data.type_id = Number($("#typeSel").value);
       ["full_name", "group", "university", "phone"].forEach(function (key) { data[key] = $("#" + key).value; });
       run($("#submit"), function send() {
         return api("tickets/create", data).then(function (result) {
           if (result.duplicate) {
             var who = result.duplicate.map(function (d) { return d.code + " — " + d.full_name; }).join("\n");
             return confirmBox("На этот номер уже выдан билет:\n" + who + "\n\nВыдать ещё?").then(function (yes) {
+              if (yes) { data.force = true; return send(); }
+            });
+          }
+          if (result.over_limit) {
+            return confirmBox("Билетов «" + result.over_limit.title + "» осталось только " + result.over_limit.left + ", а вы выдаёте " + count + ". Выдать сверх лимита?").then(function (yes) {
               if (yes) { data.force = true; return send(); }
             });
           }
@@ -463,7 +529,7 @@
   }
 
   function details(t, full) {
-    var html = "<dl><dt>ФИ</dt><dd>" + esc(t.full_name) + "</dd><dt>Группа</dt><dd>" + esc(t.group || "—") +
+    var html = "<dl>" + (t.type_title ? "<dt>Тип</dt><dd>" + esc(t.type_title) + "</dd>" : "") + "<dt>ФИ</dt><dd>" + esc(t.full_name) + "</dd><dt>Группа</dt><dd>" + esc(t.group || "—") +
       "</dd><dt>Универ</dt><dd>" + esc(t.university || "—") + "</dd><dt>Телефон</dt><dd>" + esc(t.phone || "—") + "</dd>";
     if (full) {
       html += "<dt>Выдан</dt><dd>" + esc(t.created_at) + " · " + esc(t.created_by) + "</dd><dt>Проход</dt><dd>" +
@@ -571,11 +637,105 @@
 
   // ---------- список и поиск ----------
 
+  function listTabs(params) {
+    if (!can("payments")) return "";
+    var pay = params.tab === "payments";
+    return '<div class="row tabs" id="tabs"><button type="button" class="btn' + (pay ? "" : " primary") + '" data-tab="tickets">Билеты</button>' +
+      '<button type="button" class="btn' + (pay ? " primary" : "") + '" data-tab="payments">Оплаты' + (me.pending_payments ? " · " + me.pending_payments : "") + "</button></div>";
+  }
+  function bindTabs(params) {
+    on("#tabs .btn", "click", function () { params.tab = this.dataset.tab; render(); });
+  }
+
+  var ORDER_STATUS = { pending: "На проверке", approved: "Принята", rejected: "Отклонена" };
+
+  function paymentsView(params) {
+    params.filter = params.filter || "pending";
+    var pills = [["pending", "Ожидают"], ["approved", "Принятые"], ["rejected", "Отклонённые"]];
+    app.innerHTML = header("Проверка оплат", "Список") + listTabs(params) +
+      '<div class="pills" id="pills">' + pills.map(function (p) {
+        return '<button type="button" class="pill' + (params.filter === p[0] ? " on" : "") + '" data-f="' + p[0] + '">' + p[1] + "</button>";
+      }).join("") + '</div><div class="list" id="items"><p class="loading">Загрузка…</p></div>';
+    bindTabs(params);
+    on("#pills .pill", "click", function () { params.filter = this.dataset.f; render(); });
+    api("payments/list", { status: params.filter }).then(function (r) {
+      if (!$("#items")) return;
+      me.pending_payments = r.counts.pending;
+      var tab = $("#tabs .btn[data-tab=payments]");
+      if (tab) tab.textContent = "Оплаты" + (r.counts.pending ? " · " + r.counts.pending : "");
+      $("#items").innerHTML = r.orders.map(function (o) {
+        var chipHtml = o.status === "approved" ? '<span class="chip ok">принята</span>' : o.status === "rejected" ? '<span class="chip wait">отклонена</span>'
+          : o.worst === "bad" ? '<span class="chip warn">проверьте</span>' : o.worst === "warn" ? '<span class="chip warn">замечания</span>' : '<span class="chip ok">сверка ок</span>';
+        return '<button class="item" data-id="' + o.id + '"><div class="main"><b><span class="code">№' + o.id + "</span> " + esc(o.full_name) + "</b><span>" +
+          esc(o.type_title) + " · " + esc(o.price_text) + (o.submitted_at ? " · " + esc(o.submitted_at) : "") + "</span></div>" + chipHtml + ic("chevron") + "</button>";
+      }).join("") || '<p class="loading">' + ({ pending: "Оплат на проверке нет", approved: "Принятых оплат пока нет", rejected: "Отклонённых оплат нет" }[params.filter]) + "</p>";
+      on(".item", "click", function () { go("payment", { id: Number(this.dataset.id) }); });
+    }).catch(function (error) { if ($("#items")) { $("#items").innerHTML = ""; failed(error); } });
+  }
+
+  views.payment = function (params) {
+    loading("Оплата", "№" + params.id);
+    api("payments/get", { id: params.id }).then(function (r) { showPayment(params, r.order); }).catch(failed);
+  };
+
+  function showPayment(params, o) {
+    var rc = o.receipt;
+    var rows = [["Билет", esc(o.type_title) + " · " + esc(o.price_text)], ["ФИ", esc(o.full_name)], ["Телефон", esc(o.phone || "—")], ["Университет", esc(o.university || "—")],
+      ["Telegram", o.username ? "@" + esc(o.username) : esc(o.tg_name || "—")], ["Отправлено", esc(o.submitted_at || "—")]];
+    if (o.status !== "pending") rows.push(["Проверил", esc(o.reviewed_by || "—") + (o.reviewed_at ? " · " + esc(o.reviewed_at) : "")]);
+    if (o.status === "rejected") rows.push(["Причина", esc(o.reject_reason || "не указана")]);
+    if (o.status === "approved") rows.push(["Билет", '<span class="code">' + esc(o.ticket_code) + "</span> · " + (o.delivered ? "доставлен клиенту" : "не доставлен клиенту")]);
+    var recog = [["Сумма", rc.amount], ["№ чека", rc.number], ["Дата", rc.paid_at], ["Покупатель", rc.buyer], ["Способ", rc.method], ["Получатель", rc.seller]].filter(function (x) { return x[1]; });
+    app.innerHTML = header(ORDER_STATUS[o.status], "Оплата №" + o.id) +
+      (o.has_receipt ? '<img class="receipt" id="receiptImg" alt="Чек об оплате">' : "") +
+      '<div class="card"><dl>' + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") + "</dl></div>" +
+      (o.flags && o.flags.length ? "<h2>Сверка</h2><div class=\"card\">" + o.flags.map(function (f) { return '<div class="flag ' + f.level + '"><i></i><span>' + esc(f.text) + "</span></div>"; }).join("") + "</div>" : "") +
+      (recog.length ? "<h2>Распознано в чеке</h2><div class=\"card\"><dl>" + recog.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + esc(r[1]) + "</dd>"; }).join("") + "</dl></div>" : "") +
+      (o.status === "pending"
+        ? '<button class="btn primary" id="approve">Принять оплату</button><button class="btn danger" id="rejectOpen">Отклонить…</button>' +
+          '<div id="rejectBox" hidden><h2>Причина отказа</h2><div class="reasons">' +
+          ["Оплата не поступила", "Неверная сумма", "Чек не читается", "Повторный чек", "Не тот получатель"].map(function (r) { return '<button type="button" class="pill" data-reason="' + r + '">' + r + "</button>"; }).join("") +
+          '</div><textarea id="reason" maxlength="300" placeholder="Что сказать клиенту (необязательно)"></textarea><button class="btn danger" id="reject" style="margin-top:12px">Отклонить оплату</button></div>'
+        : o.status === "approved" ? '<button class="btn" id="resend">Прислать билет клиенту снова</button>' : "") +
+      (o.has_receipt ? '<button class="btn" id="pdf">Прислать PDF-чек в чат</button>' : "");
+    if (o.has_receipt) apiImage("payments/receipt", { id: o.id }).then(function (url) { var img = $("#receiptImg"); if (img) img.src = url; }).catch(function () { var img = $("#receiptImg"); if (img) img.remove(); });
+    function done(r, message) { params.order = r.order; me.pending_payments = Math.max(0, (me.pending_payments || 1) - 1); toast(message); showPayment(params, r.order); }
+    on("#approve", "click", function () {
+      var button = this;
+      var worry = (o.flags || []).some(function (f) { return f.level === "bad"; });
+      confirmBox((worry ? "В сверке есть красные отметки. Всё равно принять оплату и выдать билет?" : "Принять оплату и отправить билет клиенту?")).then(function (yes) {
+        if (!yes) return;
+        run(button, function () {
+          return api("payments/approve", { id: o.id }).then(function (r) {
+            haptic("success"); done(r, r.delivered ? "Оплата принята, билет отправлен клиенту" : "Оплата принята, но билет не доставлен — клиент мог заблокировать бота");
+          });
+        });
+      });
+    });
+    on("#rejectOpen", "click", function () { $("#rejectBox").hidden = false; this.hidden = true; });
+    on("[data-reason]", "click", function () { $("#reason").value = this.dataset.reason; });
+    on("#reject", "click", function () {
+      run(this, function () {
+        return api("payments/reject", { id: o.id, reason: $("#reason").value }).then(function (r) { done(r, "Оплата отклонена, клиент получил сообщение"); });
+      });
+    });
+    on("#resend", "click", function () {
+      run(this, function () {
+        return api("payments/resend", { id: o.id }).then(function (r) { toast(r.delivered ? "Билет отправлен клиенту" : "Не удалось доставить: клиент мог заблокировать бота", !r.delivered); });
+      });
+    });
+    on("#pdf", "click", function () {
+      run(this, function () { return api("payments/receipt_file", { id: o.id }).then(function () { toast("PDF отправлен вам в чат с ботом"); }); });
+    });
+  }
+
   views.list = function (params) {
-    app.innerHTML = header(me.scoped ? "Билеты, выданные вами" : "Все билеты", "Список") +
+    if (params.tab === "payments" && can("payments")) return paymentsView(params);
+    app.innerHTML = header(me.scoped ? "Билеты, выданные вами" : "Все билеты", "Список") + listTabs(params) +
       '<input id="query" type="search" placeholder="Фамилия, телефон, группа или номер" autocomplete="off">' +
       '<p class="muted small" id="summary" style="margin:12px 4px"></p><div class="list" id="items"><p class="loading">Загрузка…</p></div>' +
       '<div style="margin-top:16px"><button class="btn" id="export">Выгрузить список в TXT</button></div>';
+    bindTabs(params);
     var input = $("#query"), timer, seq = 0;
     input.value = params.query || "";
     function load() {
@@ -587,7 +747,7 @@
           (data.total > data.tickets.length ? " · показаны первые " + data.tickets.length : "");
         $("#items").innerHTML = data.tickets.map(function (t) {
           return '<button class="item" data-id="' + t.id + '"><div class="main"><b><span class="code">' + esc(t.code) + "</span> " +
-            esc(t.full_name) + "</b><span>" + esc([t.group, t.university, t.phone].filter(Boolean).join(" · ") || "—") + "</span></div>" +
+            esc(t.full_name) + "</b><span>" + esc([t.type_title, t.group, t.university, t.phone].filter(Boolean).join(" · ") || "—") + "</span></div>" +
             chip(t) + ic("chevron") + "</button>";
         }).join("") || '<p class="loading">' + (query ? "Ничего не найдено" : "Билетов пока нет") + "</p>";
         on(".item", "click", function () {
@@ -783,6 +943,63 @@
     $("#home").addEventListener("click", home);
   };
 
+  // ---------- типы билетов (главный админ) ----------
+
+  views.types = function () {
+    loading("Магазин", "Типы билетов");
+    api("types/list").then(function (r) {
+      app.innerHTML = header("Магазин", "Типы билетов") +
+        '<div class="card ' + (r.shop_enabled ? "" : "warn") + '"><p style="margin:0"><b>' + (r.shop_enabled ? "Продажа в боте включена" : "Продажа в боте выключена") + "</b></p>" +
+        '<p class="muted small" style="margin:6px 0 0">Клиенты видят в боте только включённые типы. ' + (r.default_pay_url ? "Общая ссылка Kaspi задана." : "Общая ссылка Kaspi не задана — укажите её в «Настройках» или у каждого типа.") + "</p></div>" +
+        '<div class="list" id="typeList">' + (r.types.map(function (t) {
+          return '<button class="item" data-id="' + t.id + '"><div class="main"><b>' + esc(t.title) + " — " + esc(t.price_text) + "</b><span>продано " + t.sold + (t.pending ? " · на проверке " + t.pending : "") +
+            (t.left === null ? " · без лимита" : " · осталось " + t.left + " из " + t.quantity) + (t.has_design ? " · свой дизайн" : "") + "</span></div>" +
+            '<span class="chip ' + (t.active ? "ok" : "wait") + '">' + (t.active ? "в продаже" : "скрыт") + "</span>" + ic("chevron") + "</button>";
+        }).join("") || '<p class="muted center">Типов билетов пока нет. Добавьте первый, например «Стандарт», «Премиум» или «VIP».</p>') + "</div>" +
+        '<button class="btn primary" id="addType" style="margin-top:14px" data-icon="plus">Добавить тип билета</button>';
+      on(".item", "click", function () {
+        var id = Number(this.dataset.id);
+        go("type", { data: r.types.filter(function (t) { return t.id === id; })[0] });
+      });
+      $("#addType").addEventListener("click", function () { go("type", {}); });
+    }).catch(failed);
+  };
+
+  views.type = function (params) {
+    var t = params.data || { title: "", description: "", price: "", quantity: null, active: true, pay_url: "" };
+    var active = t.active !== false;
+    app.innerHTML = header(t.id ? "Тип билета" : "Новый тип", t.id ? t.title : "Билет для продажи") +
+      '<form id="typeForm">' +
+      '<label class="field"><span>Название</span><input id="tTitle" type="text" maxlength="60" autocomplete="off" placeholder="Стандарт, Премиум, VIP…" value="' + esc(t.title) + '" required></label>' +
+      '<label class="field"><span>Описание · необязательно</span><textarea id="tDesc" maxlength="300" placeholder="Что входит в билет">' + esc(t.description) + "</textarea></label>" +
+      '<label class="field"><span>Цена, ₸</span><input id="tPrice" type="text" inputmode="numeric" autocomplete="off" placeholder="1400" value="' + esc(t.price) + '" required></label>' +
+      '<label class="field"><span>Сколько билетов можно продать · пусто — без лимита</span><input id="tQty" type="text" inputmode="numeric" autocomplete="off" placeholder="без лимита" value="' + (t.quantity === null || t.quantity === undefined ? "" : esc(t.quantity)) + '"></label>' +
+      '<label class="field"><span>Ссылка оплаты Kaspi для этого билета · пусто — общая</span><input id="tUrl" type="text" inputmode="url" autocomplete="off" autocapitalize="off" placeholder="https://pay.kaspi.kz/…" value="' + esc(t.pay_url) + '"></label>' +
+      '<div class="card" style="padding:4px 14px"><button type="button" class="switch" role="switch" id="tActive" aria-checked="' + active + '"><span>В продаже (виден клиентам в боте)</span><i></i></button></div>' +
+      (t.id ? '<p class="muted small">Продано: ' + t.sold + (t.pending ? ", на проверке: " + t.pending : "") + ", выручка: " + esc(t.revenue_text) + '. Места резервируются, когда оплата отправлена на проверку; билеты, выданные вручную с этим типом, тоже считаются.</p>' : "") +
+      '<button class="btn primary" id="typeSave" type="submit">Сохранить</button></form>' +
+      (t.id ? '<button class="btn" id="typeDesign">Дизайн этого билета</button><div class="row"><button class="btn" id="typeUp" data-icon="up">Выше</button><button class="btn" id="typeDown" data-icon="down">Ниже</button></div>' +
+        '<button class="btn danger" id="typeDel">Удалить тип</button>' : "");
+    $("#tActive").addEventListener("click", function () { active = !active; this.setAttribute("aria-checked", String(active)); });
+    $("#typeForm").addEventListener("submit", function (event) {
+      event.preventDefault();
+      run($("#typeSave"), function () {
+        return api("types/save", { id: t.id, title: $("#tTitle").value, description: $("#tDesc").value, price: $("#tPrice").value.replace(/\s/g, ""),
+          quantity: $("#tQty").value.replace(/\s/g, ""), pay_url: $("#tUrl").value, active: active }).then(function () { toast("Сохранено"); back(); });
+      });
+    });
+    on("#typeDesign", "click", function () { go("design", { typeId: t.id }); });
+    function move(dir) { return function () { run(this, function () { return api("types/move", { id: t.id, dir: dir }).then(function () { toast("Порядок изменён"); }); }); }; }
+    on("#typeUp", "click", move(-1)); on("#typeDown", "click", move(1));
+    on("#typeDel", "click", function () {
+      var button = this;
+      confirmBox("Удалить тип «" + t.title + "»?").then(function (yes) {
+        if (!yes) return;
+        run(button, function () { return api("types/delete", { id: t.id }).then(function () { toast("Тип удалён"); back(); }); });
+      });
+    });
+  };
+
   // ---------- статистика ----------
 
   views.stats = function () {
@@ -796,7 +1013,13 @@
       app.innerHTML = header("Все билеты", "Статистика") + '<div class="stats">' +
         stat(s.total, "выдано билетов") + stat(s.scanned, "прошли на вход") +
         stat(s.waiting, "ещё не пришли") + stat(s.repeats, "с повторным сканированием") + "</div>" +
-        rank("По администраторам", s.by_admin) + rank("По университетам", s.by_university);
+        ((s.revenue || s.orders.pending || s.orders.approved || s.orders.rejected) ? "<h2>Продажи в боте</h2><div class=\"stats\">" +
+          stat(s.revenue_text, "выручка (принятые оплаты)") + stat(s.orders.pending || 0, "оплат на проверке") +
+          stat(s.orders.approved || 0, "оплат принято") + stat(s.orders.rejected || 0, "оплат отклонено") + "</div>" : "") +
+        (s.types.length ? "<h2>По типам билетов</h2><div class=\"card\">" + s.types.map(function (t) {
+          return '<div class="rank"><span>' + esc(t.title) + " <span class=\"muted small\">" + esc(t.price) + " · осталось " + (t.left === null ? "∞" : t.left) + "</span></span><b>" + t.sold + "</b></div>";
+        }).join("") + "</div>" : "") +
+        rank("По администраторам (Система — покупки в боте)", s.by_admin) + rank("По университетам", s.by_university);
     }).catch(failed);
   };
   function stat(value, label) { return '<div class="stat"><b>' + value + "</b><span>" + label + "</span></div>"; }
@@ -869,24 +1092,28 @@
   views.design = function (params) {
     if (params.pending) return designEditor(params);
     loading("Шаблон", "Дизайн билета");
-    Promise.all([api("design/state"), apiImage("design/image")]).then(function (r) {
-      var state = r[0];
-      app.innerHTML = header("Шаблон", "Дизайн билета") +
+    var typeId = params.typeId || 0;
+    Promise.all([api("design/state", { type_id: typeId }), apiImage("design/image", { type_id: typeId }), api("types/list")]).then(function (r) {
+      var state = r[0], types = r[2].types;
+      var chooser = types.length ? '<label class="field"><span>Дизайн для</span><select class="sel" id="designFor"><option value="0">Общий (билеты без типа и типы без своего дизайна)</option>' +
+        types.map(function (t) { return '<option value="' + t.id + '"' + (t.id === typeId ? " selected" : "") + ">" + esc(t.title) + (t.has_design ? " ✓ свой дизайн" : "") + "</option>"; }).join("") + "</select></label>" : "";
+      app.innerHTML = header("Шаблон", "Дизайн билета") + chooser +
         '<img class="preview" alt="Текущий дизайн билета" src="' + r[1] + '">' +
-        '<p class="muted small center" style="margin-top:10px">Сейчас используется ' + (state.custom ? "ваш" : "стандартный") +
-        " дизайн. QR и ФИ показаны для примера." + (state.name ? "" : " ФИ на билете не печатается.") + "</p>" +
+        '<p class="muted small center" style="margin-top:10px">' + (typeId ? (state.inherited ? "У этого типа нет своего дизайна — используется общий." : "У этого типа свой дизайн.") : "Сейчас используется " + (state.custom ? "ваш" : "стандартный") + " общий дизайн.") +
+        " QR и ФИ показаны для примера." + (state.name ? "" : " ФИ на билете не печатается.") + "</p>" +
         '<input type="file" id="file" accept="image/png,image/jpeg,image/webp" hidden>' +
         '<button class="btn primary" id="upload">Загрузить новый дизайн</button>' +
-        (state.custom ? '<button class="btn" id="default">Вернуть стандартный</button>' : "") +
+        (state.custom ? '<button class="btn" id="default">' + (typeId ? "Убрать свой дизайн (будет общий)" : "Вернуть стандартный") + "</button>" : "") +
         '<p class="muted small" style="margin-top:14px">После загрузки ИИ найдёт место под QR-код и место, где на билете можно печатать ФИ гостя (в шаблоне его быть не должно). Вы проверите результат и при необходимости поправите оба места прямо на картинке.</p>';
       $("#upload").addEventListener("click", function () { $("#file").click(); });
+      if ($("#designFor")) $("#designFor").addEventListener("change", function () { params.typeId = Number(this.value); render(); });
       $("#file").addEventListener("change", function () {
         var file = this.files[0];
         if (!file) return;
         var button = $("#upload");
         button.textContent = "ИИ ищет места для QR и ФИ…";
         run(button, function () {
-          return request("design/upload", { body: file }).then(function (response) {
+          return request("design/upload?type_id=" + typeId, { body: file }).then(function (response) {
             return response.json().then(function (data) {
               if (!response.ok) throw new Error(data.error || "Не удалось загрузить");
               params.pending = data; render();
@@ -896,7 +1123,7 @@
       });
       on("#default", "click", function () {
         run(this, function () {
-          return api("design/default").then(function () { toast("Возвращён стандартный дизайн"); render(); });
+          return api("design/default", { type_id: typeId }).then(function () { toast(typeId ? "Свой дизайн убран" : "Возвращён стандартный дизайн"); render(); });
         });
       });
     }).catch(failed);
@@ -945,7 +1172,7 @@
       $("#nameSwitch").setAttribute("aria-checked", String(nameOn));
       $("#nameSliders").style.display = nameOn ? "" : "none";
       Array.prototype.forEach.call(document.querySelectorAll("#aligns .btn"), function (b) { b.classList.toggle("primary", b.dataset.a === nm.align); });
-      apiImage("design/image", { pending: true, box: box, name: nameLayout() }).then(function (url) {
+      apiImage("design/image", { pending: true, box: box, name: nameLayout(), type_id: params.typeId || 0 }).then(function (url) {
         if (mine === seq && img.isConnected) img.src = url;
       }).catch(function (error) { toast(error.message, true); });
     }
@@ -998,21 +1225,21 @@
     $("#hintForm").addEventListener("submit", function (event) {
       event.preventDefault();
       run(this.querySelector("button"), function () {
-        return api("design/retry", { box: box, name: nameLayout(), hint: $("#hint").value }).then(function (data) {
+        return api("design/retry", { box: box, name: nameLayout(), hint: $("#hint").value, type_id: params.typeId || 0 }).then(function (data) {
           params.pending = data; render();
         });
       });
     });
     $("#save").addEventListener("click", function () {
       run(this, function () {
-        return api("design/save", { box: box, name: nameLayout() }).then(function () {
+        return api("design/save", { box: box, name: nameLayout(), type_id: params.typeId || 0 }).then(function () {
           haptic("success"); toast("Новый дизайн сохранён"); params.pending = null; render();
         });
       });
     });
     $("#cancel").addEventListener("click", function () {
       run(this, function () {
-        return api("design/cancel").then(function () { params.pending = null; render(); });
+        return api("design/cancel", { type_id: params.typeId || 0 }).then(function () { params.pending = null; render(); });
       });
     });
     setTarget("qr");
@@ -1030,6 +1257,13 @@
         '<div class="row"><button class="btn primary" type="submit" data-icon="check">Сохранить ключ</button>' +
         (data.groq_set ? '<button class="btn fit danger" type="button" id="groqDel">Удалить</button>' : "") + "</div></form>" +
         '<p class="muted small" style="margin-top:10px">Нужен для смены дизайна билета (ИИ находит место под QR-код и под ФИ) и для разбора списков при массовом заливе. Бесплатный ключ — на console.groq.com/keys</p>' +
+        '<h2>Магазин в боте</h2><p class="muted small">Клиенты (не админы) пишут боту /start, выбирают билет, оплачивают по ссылке Kaspi и присылают PDF-чек. Типы билетов, цены и количество — в разделе «Типы билетов».</p>' +
+        '<form id="shopForm"><div class="card" style="padding:4px 14px"><button type="button" class="switch" role="switch" id="shopOn" aria-checked="' + data.shop_enabled + '"><span>Продажа билетов в боте включена</span><i></i></button></div>' +
+        '<label class="field"><span>Общая ссылка оплаты Kaspi</span><input id="shopUrl" type="text" inputmode="url" autocomplete="off" autocapitalize="off" placeholder="https://pay.kaspi.kz/…" value="' + esc(data.shop_pay_url) + '"></label>' +
+        '<label class="field"><span>ИИН/БИН получателя · необязательно</span><input id="shopBin" type="text" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="12 цифр — бот сверит с чеком" value="' + esc(data.shop_bin) + '"></label>' +
+        '<label class="field"><span>Приветствие для клиентов · необязательно</span><textarea id="shopWelcome" maxlength="500" placeholder="' + esc(data.welcome_default) + '">' + esc(data.shop_welcome) + "</textarea></label>" +
+        '<button class="btn primary" type="submit" data-icon="check">Сохранить магазин</button></form>' +
+        '<p class="muted small" style="margin-top:10px">Если задан ИИН/БИН, бот не примет чек, выписанный на другого получателя. Ссылку можно задать и отдельно для каждого типа билета.</p>' +
         '<h2>Модели ИИ</h2><p class="muted small">Обычно ничего менять не нужно: если модель по умолчанию недоступна (Groq иногда снимает их с поддержки), бот сам находит рабочую среди моделей вашего ключа и запоминает её. Поля ниже — чтобы выбрать модель вручную; пустое поле — автоматически.</p>' +
         '<form id="modelForm"><label class="field"><span>Модель для картинок (дизайн билета)' + (data.vision_auto ? " — сейчас: " + esc(data.vision_auto) : "") +
         '</span><input id="visionModel" type="text" autocomplete="off" autocapitalize="off" placeholder="' + esc(data.vision_default) + '" value="' + esc(data.vision_model) + '"></label>' +
@@ -1049,6 +1283,12 @@
         save(this.querySelector("button"), { groq_api_key: $("#groq").value }, "Ключ сохранён");
       });
       on("#groqDel", "click", function () { save(this, { groq_api_key: "" }, "Ключ удалён"); });
+      var shopOn = data.shop_enabled;
+      $("#shopOn").addEventListener("click", function () { shopOn = !shopOn; this.setAttribute("aria-checked", String(shopOn)); });
+      $("#shopForm").addEventListener("submit", function (event) {
+        event.preventDefault();
+        save(this.querySelector("button.primary"), { shop_enabled: shopOn, shop_pay_url: $("#shopUrl").value, shop_bin: $("#shopBin").value, shop_welcome: $("#shopWelcome").value }, "Магазин сохранён");
+      });
       $("#modelForm").addEventListener("submit", function (event) {
         event.preventDefault();
         save(this.querySelector("button"), { vision_model: $("#visionModel").value, text_model: $("#textModel").value }, "Модели сохранены");
@@ -1076,24 +1316,28 @@
   // ---------- сброс ----------
 
   views.reset = function () {
-    app.innerHTML = header("Опасная зона", "Сброс списка") +
-      '<div class="card bad"><p class="verdict">Будут удалены все билеты</p><p class="muted">Все выданные QR-коды перестанут работать, нумерация начнётся заново. ' +
-      "Перед удалением бот пришлёт вам в чат резервную копию списка в TXT.</p></div>" +
-      '<button class="btn danger" id="reset">Удалить все билеты</button>';
-    $("#reset").addEventListener("click", function () {
-      var button = this;
-      confirmBox("Точно удалить все билеты? Отменить это нельзя.").then(function (yes) {
-        if (!yes) return;
-        run(button, function () {
-          return api("reset").then(function (data) {
-            app.innerHTML = header("Готово", "Список сброшен") + '<div class="card ok"><p class="verdict">Удалено билетов: ' +
-              data.deleted + '</p><p class="muted">Резервная копия отправлена вам в чат с ботом.</p></div>' +
-              '<button class="btn" id="home">На главную</button>';
-            $("#home").addEventListener("click", home);
+    loading("Опасная зона", "Сброс списка");
+    api("reset/info").then(function (i) {
+      app.innerHTML = header("Опасная зона", "Сброс списка") +
+        '<div class="card bad"><p class="verdict">Будут удалены все билеты и заказы</p><p class="muted">Билетов: ' + i.tickets + ", заказов в боте: " + i.orders +
+        (i.pending ? ' (<b>из них ' + i.pending + " ждут проверки оплаты!</b>)" : "") + ". Все выданные QR-коды перестанут работать, нумерация начнётся заново, PDF-чеки клиентов удалятся. " +
+        "Типы билетов, цены и настройки останутся. Перед удалением бот пришлёт вам в чат резервную копию списка в TXT.</p></div>" +
+        '<button class="btn danger" id="reset">Удалить всё</button>';
+      $("#reset").addEventListener("click", function () {
+        var button = this;
+        confirmBox("Точно удалить все билеты и заказы" + (i.pending ? " (включая " + i.pending + " неоплаченных на проверке)" : "") + "? Отменить это нельзя.").then(function (yes) {
+          if (!yes) return;
+          run(button, function () {
+            return api("reset").then(function (data) {
+              app.innerHTML = header("Готово", "Список сброшен") + '<div class="card ok"><p class="verdict">Удалено билетов: ' +
+                data.deleted + '</p><p class="muted">Резервная копия отправлена вам в чат с ботом.</p></div>' +
+                '<button class="btn" id="home">На главную</button>';
+              $("#home").addEventListener("click", home);
+            });
           });
         });
       });
-    });
+    }).catch(failed);
   };
 
   // ---------- уведомления ----------
@@ -1101,12 +1345,12 @@
   // (например, «билеты массового залива отправлены в чат»).
 
   function handleEvent(ev) {
-    if (ev.type === "notice") toast(ev.text, !!ev.error);
+    if (ev.type === "notice") { toast(ev.text, !!ev.error); refreshMe(); }
   }
 
   var lastEvent = null;
   function pollEvents() {
-    api("events/poll", { after: lastEvent, wait: 20 }).then(function (data) {
+    api("events/poll", { after: lastEvent, wait: 20 }, true).then(function (data) {
       lastEvent = data.last;
       data.events.forEach(handleEvent);
       pollEvents();
@@ -1121,7 +1365,12 @@
     tg.BackButton.onClick(back);
   } catch (e) {}
 
-  api("me").then(function (data) { me = data; home(); pollEvents(); }).catch(function (error) {
+  api("me").then(function (data) {
+    me = data; home(); pollEvents();
+    // Ссылка из уведомления об оплате открывает проверку сразу: ?pay=<номер заказа>
+    var pay = Number(new URLSearchParams(location.search).get("pay"));
+    if (pay && can("payments")) go("payment", { id: pay });
+  }).catch(function (error) {
     app.innerHTML = header("Билеты", "Нет доступа") + '<div class="card bad"><p>' + esc(error.message) + "</p></div>";
   });
 })();

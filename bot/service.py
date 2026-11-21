@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 from contextlib import suppress
 from pathlib import Path
@@ -55,12 +56,12 @@ def render_preview(
 async def locate_box(
     config: Config, db: Database, size: tuple[int, int],
     previous: Box | None = None, hint: str | None = None,
-    previous_name: dict | None = None,
+    previous_name: dict | None = None, path: Path | None = None,
 ) -> tuple[Box | None, dict | None, str, str]:
     """Ищет на черновике дизайна место под QR и место, где можно печатать ФИ:
     ИИ + поиск образца QR на самой картинке.
     Возвращает (квадрат под QR или None, раскладка ФИ или None, откуда взято, проблема)."""
-    path = config.pending_path
+    path = path or config.pending_path
     box, name, source, problem = None, None, "", ""
     key = groq_key(db, config)
     if key:
@@ -146,8 +147,8 @@ class Screen:
 
 
 class AccessMiddleware(BaseMiddleware):
-    """Пускает к боту только администраторов. Всем остальным бот не отвечает
-    вообще ничего."""
+    """Определяет, кто пишет боту. data["access"] — права администратора или None, если это
+    клиент: клиентам доступен только магазин (обработчики администраторов проверяют access)."""
 
     async def __call__(self, handler, event: Message | CallbackQuery, data: dict):
         user = event.from_user
@@ -155,16 +156,33 @@ class AccessMiddleware(BaseMiddleware):
         if user is None or message is None or message.chat.type != "private":
             return None
         db, config = data["db"], data["config"]
-        access = resolve_access(user, db, config)
-        if access is None:
-            return None
-        data["access"] = access
+        data["access"] = resolve_access(user, db, config)
         data["screen"] = Screen(data["bot"], db, message.chat.id)
         return await handler(event, data)
 
 
-def current_template(db: Database, config: Config) -> tuple[Path, Box, dict | None]:
-    """Действующий дизайн: (файл шаблона, квадрат под QR, раскладка ФИ или None)."""
+def design_paths(config: Config, type_id: int | None = None) -> tuple[Path, Path]:
+    """(файл дизайна, файл черновика) — общего или конкретного типа билета."""
+    if not type_id:
+        return config.template_path, config.pending_path
+    config.templates_dir.mkdir(parents=True, exist_ok=True)
+    return (
+        config.templates_dir / f"type_{type_id}.png",
+        config.templates_dir / f"type_{type_id}_pending.png",
+    )
+
+
+def current_template(
+    db: Database, config: Config, type_id: int | None = None
+) -> tuple[Path, Box, dict | None]:
+    """Действующий дизайн: (файл шаблона, квадрат под QR, раскладка ФИ или None).
+    У типа билета может быть свой дизайн; без него берётся общий."""
+    if type_id:
+        t = db.get_type(type_id)
+        path = design_paths(config, type_id)[0]
+        if t and t["has_design"] and t["design_box"] and path.exists():
+            name = json.loads(t["design_name"]) if t["design_name"] else None
+            return path, tuple(json.loads(t["design_box"])), name if name and name.get("enabled") else None
     box = db.get_setting("template_box")
     if box and config.template_path.exists():
         name = db.get_setting("template_name")
@@ -173,7 +191,7 @@ def current_template(db: Database, config: Config) -> tuple[Path, Box, dict | No
 
 
 async def ticket_png(t: Ticket, db: Database, config: Config, bot_username: str) -> bytes:
-    template, box, name_layout = current_template(db, config)
+    template, box, name_layout = current_template(db, config, t["type_id"])
     return await asyncio.to_thread(
         render_ticket, template, box, qr_payload(bot_username, t["token"]),
         t["full_name"], name_layout,
@@ -225,6 +243,9 @@ def ticket_dict(t: Ticket, access: Access, config: Config) -> dict:
         "first_scan_by": t["first_scan_by_name"],
         "can_delete": can_delete(t, access),
         "can_unscan": access.is_main and bool(t["scan_count"]),
+        "type_id": t["type_id"],
+        "type_title": t["type_title"],
+        "system": t["created_by"] == 0,
     }
 
 

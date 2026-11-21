@@ -1,4 +1,4 @@
-"""Лёгкая база на SQLite: билеты, администраторы, настройки."""
+"""Лёгкая база на SQLite: билеты, типы билетов, заказы, администраторы, настройки."""
 from __future__ import annotations
 
 import json
@@ -22,8 +22,50 @@ CREATE TABLE IF NOT EXISTS tickets (
     scan_count         INTEGER NOT NULL DEFAULT 0,
     first_scan_at      TEXT,
     first_scan_by_name TEXT,
-    last_scan_at       TEXT
+    last_scan_at       TEXT,
+    type_id            INTEGER,                 -- тип билета (NULL — выдан без типа)
+    type_title         TEXT NOT NULL DEFAULT '',
+    order_id           INTEGER                  -- заказ, по которому выдан билет
 );
+CREATE TABLE IF NOT EXISTS ticket_types (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    price       INTEGER NOT NULL DEFAULT 0,     -- в тенге
+    quantity    INTEGER,                        -- сколько всего можно продать; NULL — без лимита
+    active      INTEGER NOT NULL DEFAULT 1,
+    pay_url     TEXT NOT NULL DEFAULT '',       -- своя ссылка оплаты; пусто — общая
+    sort        INTEGER NOT NULL DEFAULT 0,
+    has_design  INTEGER NOT NULL DEFAULT 0,     -- свой дизайн (файл data/templates/type_N.png)
+    design_box  TEXT,                           -- JSON [x, y, сторона] — место QR
+    design_name TEXT,                           -- JSON — раскладка ФИ
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS orders (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL,              -- Telegram ID покупателя
+    username     TEXT,
+    tg_name      TEXT NOT NULL DEFAULT '',
+    type_id      INTEGER,
+    type_title   TEXT NOT NULL,                 -- название и цена на момент заказа
+    price        INTEGER NOT NULL,
+    status       TEXT NOT NULL,                 -- chosen, receipt, name, phone, univ, pending, approved, rejected, cancelled
+    full_name    TEXT NOT NULL DEFAULT '',
+    phone        TEXT NOT NULL DEFAULT '',
+    university   TEXT NOT NULL DEFAULT '',
+    receipt_file TEXT NOT NULL DEFAULT '',      -- имя файла в data/receipts
+    receipt_no   TEXT NOT NULL DEFAULT '',      -- номер чека из PDF
+    receipt_info TEXT NOT NULL DEFAULT '{}',    -- JSON: что распознано в чеке
+    created_at   TEXT NOT NULL,
+    submitted_at TEXT,
+    reviewed_at  TEXT,
+    reviewed_by  TEXT NOT NULL DEFAULT '',
+    reject_reason TEXT NOT NULL DEFAULT '',
+    ticket_id    INTEGER,
+    delivered    INTEGER NOT NULL DEFAULT 0     -- билет дошёл до клиента в чат
+);
+CREATE INDEX IF NOT EXISTS orders_user ON orders (user_id, status);
+CREATE INDEX IF NOT EXISTS orders_receipt ON orders (receipt_no);
 CREATE TABLE IF NOT EXISTS admins (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id  INTEGER UNIQUE,          -- NULL, пока добавленный по нику не написал боту
@@ -52,6 +94,7 @@ class Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._migrate_admins()
         self.conn.executescript(SCHEMA)
+        self._migrate_tickets()
         self.conn.commit()
 
     def close(self) -> None:
@@ -71,6 +114,17 @@ class Database:
             )
             self.conn.execute("DROP TABLE admins_old")
 
+    def _migrate_tickets(self) -> None:
+        """Колонки типа билета и заказа для баз, созданных до магазина."""
+        have = {r["name"] for r in self.conn.execute("PRAGMA table_info(tickets)")}
+        for name, ddl in (
+            ("type_id", "INTEGER"),
+            ("type_title", "TEXT NOT NULL DEFAULT ''"),
+            ("order_id", "INTEGER"),
+        ):
+            if name not in have:
+                self.conn.execute(f"ALTER TABLE tickets ADD COLUMN {name} {ddl}")
+
     # ---------- билеты ----------
 
     def create_ticket(
@@ -81,14 +135,18 @@ class Database:
         phone: str,
         created_by: int,
         created_by_name: str,
+        type_id: int | None = None,
+        type_title: str = "",
+        order_id: int | None = None,
     ) -> Ticket:
         token = secrets.token_urlsafe(12)
         with self.conn:
             cur = self.conn.execute(
                 "INSERT INTO tickets (token, full_name, study_group, university, phone,"
-                " created_at, created_by, created_by_name) VALUES (?,?,?,?,?,?,?,?)",
+                " created_at, created_by, created_by_name, type_id, type_title, order_id)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (token, full_name, study_group, university, phone, now_iso(),
-                 created_by, created_by_name),
+                 created_by, created_by_name, type_id, type_title, order_id),
             )
         return self.get_ticket(cur.lastrowid)
 
@@ -171,6 +229,184 @@ class Database:
             n = self.conn.execute("DELETE FROM tickets").rowcount
             self.conn.execute("DELETE FROM sqlite_sequence WHERE name = 'tickets'")
         return n
+
+    def reset_orders(self) -> list[str]:
+        """Удаляет все заказы (при полном сбросе). Возвращает имена файлов чеков для удаления."""
+        with self.conn:
+            files = [r["receipt_file"] for r in self.conn.execute(
+                "SELECT receipt_file FROM orders WHERE receipt_file != ''")]
+            self.conn.execute("DELETE FROM orders")
+            self.conn.execute("DELETE FROM sqlite_sequence WHERE name = 'orders'")
+        return files
+
+    # ---------- типы билетов ----------
+
+    TYPE_FIELDS = {
+        "title", "description", "price", "quantity", "active", "pay_url", "sort",
+        "has_design", "design_box", "design_name",
+    }
+
+    def list_types(self, active_only: bool = False) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM ticket_types" + (" WHERE active = 1" if active_only else "")
+        return self.conn.execute(sql + " ORDER BY sort, id").fetchall()
+
+    def get_type(self, type_id: int | None) -> sqlite3.Row | None:
+        if type_id is None:
+            return None
+        return self.conn.execute(
+            "SELECT * FROM ticket_types WHERE id = ?", (type_id,)
+        ).fetchone()
+
+    def add_type(
+        self, title: str, description: str, price: int, quantity: int | None,
+        pay_url: str, active: bool = True,
+    ) -> int:
+        with self.conn:
+            top = self.conn.execute("SELECT COALESCE(MAX(sort), 0) FROM ticket_types").fetchone()[0]
+            cur = self.conn.execute(
+                "INSERT INTO ticket_types (title, description, price, quantity, active, pay_url,"
+                " sort, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (title, description, price, quantity, int(active), pay_url, top + 1, now_iso()),
+            )
+        return cur.lastrowid
+
+    def update_type(self, type_id: int, **fields: Any) -> None:
+        fields = {k: v for k, v in fields.items() if k in self.TYPE_FIELDS}
+        if not fields:
+            return
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE ticket_types SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
+                (*fields.values(), type_id),
+            )
+
+    def delete_type(self, type_id: int) -> None:
+        with self.conn:
+            self.conn.execute("DELETE FROM ticket_types WHERE id = ?", (type_id,))
+
+    def type_usage(self, type_id: int) -> int:
+        """Сколько билетов и заказов связано с типом (если есть — удалять нельзя)."""
+        return self.conn.execute(
+            "SELECT (SELECT COUNT(*) FROM tickets WHERE type_id = ?)"
+            " + (SELECT COUNT(*) FROM orders WHERE type_id = ?)", (type_id, type_id),
+        ).fetchone()[0]
+
+    def types_overview(self) -> list[dict]:
+        """Типы с продажами: sold — выдано билетов, pending — оплат на проверке (они резервируют
+        места), left — сколько ещё можно продать (None — без лимита), revenue — принятые оплаты."""
+        out = []
+        for t in self.list_types():
+            sold = self.conn.execute(
+                "SELECT COUNT(*) FROM tickets WHERE type_id = ?", (t["id"],)).fetchone()[0]
+            pending = self.conn.execute(
+                "SELECT COUNT(*) FROM orders WHERE type_id = ? AND status = 'pending'",
+                (t["id"],)).fetchone()[0]
+            revenue = self.conn.execute(
+                "SELECT COALESCE(SUM(price), 0) FROM orders WHERE type_id = ? AND status = 'approved'",
+                (t["id"],)).fetchone()[0]
+            left = None if t["quantity"] is None else max(0, t["quantity"] - sold - pending)
+            out.append({"row": t, "sold": sold, "pending": pending, "left": left, "revenue": revenue})
+        return out
+
+    def type_left(self, type_id: int) -> int | None:
+        for item in self.types_overview():
+            if item["row"]["id"] == type_id:
+                return item["left"]
+        return 0
+
+    # ---------- заказы (покупки через бота) ----------
+
+    ORDER_FIELDS = {
+        "status", "full_name", "phone", "university", "receipt_file", "receipt_no",
+        "receipt_info", "submitted_at", "reviewed_at", "reviewed_by", "reject_reason",
+        "ticket_id", "delivered", "type_id", "type_title", "price",
+    }
+    FLOW = ("chosen", "receipt", "name", "phone", "univ")   # клиент ещё в процессе покупки
+
+    def create_order(self, user_id: int, username: str | None, tg_name: str, t: sqlite3.Row) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO orders (user_id, username, tg_name, type_id, type_title, price,"
+                " status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (user_id, username, tg_name, t["id"], t["title"], t["price"], "chosen", now_iso()),
+            )
+        return cur.lastrowid
+
+    def get_order(self, order_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+
+    def active_order(self, user_id: int) -> sqlite3.Row | None:
+        marks = ",".join("?" * len(self.FLOW))
+        return self.conn.execute(
+            f"SELECT * FROM orders WHERE user_id = ? AND status IN ({marks}) ORDER BY id DESC LIMIT 1",
+            (user_id, *self.FLOW),
+        ).fetchone()
+
+    def update_order(self, order_id: int, **fields: Any) -> None:
+        fields = {k: v for k, v in fields.items() if k in self.ORDER_FIELDS}
+        if not fields:
+            return
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE orders SET {', '.join(f'{k} = ?' for k in fields)} WHERE id = ?",
+                (*fields.values(), order_id),
+            )
+
+    def claim_order(self, order_id: int, from_statuses: tuple[str, ...], **fields: Any) -> bool:
+        """Меняет заказ, только если он сейчас в одном из from_statuses (защита от двойного
+        нажатия «принять» двумя админами). True — заказ изменён этим вызовом."""
+        fields = {k: v for k, v in fields.items() if k in self.ORDER_FIELDS}
+        marks = ",".join("?" * len(from_statuses))
+        with self.conn:
+            cur = self.conn.execute(
+                f"UPDATE orders SET {', '.join(f'{k} = ?' for k in fields)}"
+                f" WHERE id = ? AND status IN ({marks})",
+                (*fields.values(), order_id, *from_statuses),
+            )
+        return cur.rowcount == 1
+
+    def cancel_flow_orders(self, user_id: int) -> None:
+        """Клиент начал заново: незавершённые заказы отменяются."""
+        marks = ",".join("?" * len(self.FLOW))
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE orders SET status = 'cancelled' WHERE user_id = ? AND status IN ({marks})",
+                (user_id, *self.FLOW),
+            )
+
+    def orders_by_status(self, status: str | None, limit: int = 200) -> list[sqlite3.Row]:
+        if status == "pending":   # ждущие проверки — по порядку поступления
+            return self.conn.execute(
+                "SELECT * FROM orders WHERE status = 'pending' ORDER BY submitted_at, id LIMIT ?",
+                (limit,)).fetchall()
+        if status:
+            return self.conn.execute(
+                "SELECT * FROM orders WHERE status = ? ORDER BY id DESC LIMIT ?",
+                (status, limit)).fetchall()
+        return self.conn.execute(
+            "SELECT * FROM orders WHERE status IN ('pending','approved','rejected')"
+            " ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+
+    def orders_of_user(self, user_id: int, limit: int = 6) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM orders WHERE user_id = ? AND status IN ('pending','approved','rejected')"
+            " ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
+
+    def order_counts(self) -> dict[str, int]:
+        rows = self.conn.execute("SELECT status, COUNT(*) AS n FROM orders GROUP BY status").fetchall()
+        return {r["status"]: r["n"] for r in rows}
+
+    def revenue(self) -> int:
+        return self.conn.execute(
+            "SELECT COALESCE(SUM(price), 0) FROM orders WHERE status = 'approved'").fetchone()[0]
+
+    def find_receipt(self, number: str, exclude_id: int = 0) -> sqlite3.Row | None:
+        """Заказ, в котором уже использован чек с таким номером (ждущий проверки или принятый)."""
+        if not number:
+            return None
+        return self.conn.execute(
+            "SELECT * FROM orders WHERE receipt_no = ? AND id != ? AND status IN ('pending','approved')"
+            " LIMIT 1", (number, exclude_id)).fetchone()
 
     # ---------- администраторы ----------
 

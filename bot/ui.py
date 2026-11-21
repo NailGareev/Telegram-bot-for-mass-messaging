@@ -52,7 +52,8 @@ def dash(value: str | None) -> str:
 def client_block(t: Ticket, config: Config) -> str:
     return (
         f"🎟 Билет <b>{ticket_code(config, t['id'])}</b>\n"
-        f"👤 ФИ: <b>{escape(t['full_name'])}</b>\n"
+        + (f"🎫 Тип: {escape(t['type_title'])}\n" if t["type_title"] else "")
+        + f"👤 ФИ: <b>{escape(t['full_name'])}</b>\n"
         f"👥 Группа: {dash(t['study_group'])}\n"
         f"🎓 Универ: {dash(t['university'])}\n"
         f"📞 Телефон: {dash(t['phone'])}"
@@ -81,7 +82,8 @@ def export_txt(tickets: list[Ticket], config: Config) -> bytes:
         else:
             status = "не сканировался"
         lines += [
-            f"{n}. {ticket_code(config, t['id'])} — {t['full_name']}",
+            f"{n}. {ticket_code(config, t['id'])} — {t['full_name']}"
+            + (f" [{t['type_title']}]" if t["type_title"] else ""),
             f"   Группа: {t['study_group'] or '—'}",
             f"   Универ: {t['university'] or '—'}",
             f"   Телефон: {t['phone'] or '—'}",

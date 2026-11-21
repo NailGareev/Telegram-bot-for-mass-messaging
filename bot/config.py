@@ -46,6 +46,16 @@ class Config:
     def pending_path(self) -> Path:
         return self.data_dir / "template_pending.png"
 
+    @property
+    def receipts_dir(self) -> Path:
+        """Чеки клиентов (PDF)."""
+        return self.data_dir / "receipts"
+
+    @property
+    def templates_dir(self) -> Path:
+        """Свои дизайны типов билетов."""
+        return self.data_dir / "templates"
+
     def is_main(self, user_id: int) -> bool:
         return user_id in self.main_admin_ids
 

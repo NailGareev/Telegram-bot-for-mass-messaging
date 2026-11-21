@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import re
 import secrets
@@ -14,6 +15,7 @@ import shutil
 import time
 import zipfile
 from collections import Counter
+from pathlib import Path
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -26,16 +28,17 @@ from .access import DEFAULT_PERMS, PERMS, Access, dump_perms, parse_perms, resol
 from .config import BASE_DIR, Config
 from .db import Database
 from .importer import MAX_TICKETS_AT_ONCE, clean, normalize_phone
-from . import ai, importer
+from . import ai, importer, receipts, shop
 from .events import Hub
 from .imaging import (
     ALIGNS, clamp_box, clamp_name_box, decode_qr, extract_token, image_size, save_template,
 )
 from .service import (
-    admin_label, current_template, export_file, groq_key, locate_box, mask, notify_admin,
-    render_preview, sync_menu_button, ticket_dict, ticket_file, ticket_png,
+    admin_label, current_template, design_paths, export_file, groq_key, locate_box, mask,
+    notify_admin, render_preview, sync_menu_button, ticket_dict, ticket_file, ticket_png,
 )
-from .ui import can_delete, client_block, export_txt, ticket_code
+from .shop import ShopError, money
+from .ui import can_delete, client_block, export_txt, fmt_dt, ticket_code
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +92,18 @@ class WebApi:
             "design/default": self.design_default,
             "design/image": self.design_image,
             "reset": self.reset,
+            "reset/info": self.reset_info,
+            "types/list": self.types_list,
+            "types/save": self.types_save,
+            "types/delete": self.types_delete,
+            "types/move": self.types_move,
+            "payments/list": self.payments_list,
+            "payments/get": self.payments_get,
+            "payments/receipt": self.payments_receipt,
+            "payments/receipt_file": self.payments_receipt_file,
+            "payments/approve": self.payments_approve,
+            "payments/reject": self.payments_reject,
+            "payments/resend": self.payments_resend,
             "settings/get": self.settings_get,
             "settings/set": self.settings_set,
             "settings/check": self.settings_check,
@@ -167,6 +182,7 @@ class WebApi:
             "perms": [p for p in PERMS if access.can(p)],
             "scoped": access.tickets_owner is not None,
             "max_tickets": MAX_TICKETS_AT_ONCE,
+            "pending_payments": self.db.order_counts().get("pending", 0) if access.can("payments") else 0,
         })
 
     # ---------- билеты ----------
@@ -198,11 +214,23 @@ class WebApi:
                     for t in same
                 ]
             })
+        type_row = None
+        if data.get("type_id"):
+            try:
+                type_row = self.db.get_type(int(data["type_id"]))
+            except (TypeError, ValueError):
+                type_row = None
+            if not type_row:
+                raise ApiError("Тип билета не найден", 404)
+            left = self.db.type_left(type_row["id"])
+            if left is not None and left < count and not data.get("force"):
+                return web.json_response({"over_limit": {"left": left, "title": type_row["title"]}})
         user: User = request["user"]
         tickets = [
             self.db.create_ticket(
                 fields["full_name"], fields["group"], fields["university"], phone,
                 user.id, user.full_name,
+                type_row["id"] if type_row else None, type_row["title"] if type_row else "",
             )
             for _ in range(count)
         ]
@@ -551,6 +579,17 @@ class WebApi:
             "repeats": sum(1 for t in tickets if t["scan_count"] > 1),
             "by_admin": top("created_by_name"),
             "by_university": top("university"),
+            "revenue": self.db.revenue(),
+            "revenue_text": money(self.db.revenue()),
+            "orders": self.db.order_counts(),
+            "types": [
+                {
+                    "title": i["row"]["title"], "price": money(i["row"]["price"]), "sold": i["sold"],
+                    "pending": i["pending"], "quantity": i["row"]["quantity"], "left": i["left"],
+                    "revenue": money(i["revenue"]),
+                }
+                for i in self.db.types_overview()
+            ],
         })
 
     # ---------- администраторы ----------
@@ -635,22 +674,38 @@ class WebApi:
         return web.json_response(self.admins_payload(access))
 
     # ---------- дизайн билета ----------
+    # Дизайн бывает общий (для билетов без типа и типов без своего дизайна) и свой у каждого типа:
+    # во всех запросах необязательное поле type_id указывает, чей дизайн правим.
 
-    def design_payload(self, **extra) -> dict:
-        path, box, name = current_template(self.db, self.config)
+    def design_ctx(self, raw_type) -> tuple[int | None, Path, Path]:
+        try:
+            type_id = int(raw_type) if raw_type not in (None, "", 0, "0") else None
+        except (TypeError, ValueError):
+            raise ApiError("Некорректный тип билета")
+        if type_id and not self.db.get_type(type_id):
+            raise ApiError("Тип билета не найден", 404)
+        final, pending = design_paths(self.config, type_id)
+        return type_id, final, pending
+
+    def design_payload(self, type_id: int | None = None, **extra) -> dict:
+        path, box, name = current_template(self.db, self.config, type_id)
+        own = path == design_paths(self.config, type_id)[0]
         return {
-            "custom": path == self.config.template_path, "box": list(box),
-            "name": name, **extra,
+            "custom": own, "inherited": bool(type_id) and not own,
+            "box": list(box), "name": name, "type_id": type_id, **extra,
         }
 
     async def design_state(self, request: web.Request) -> web.Response:
         self.need(request, "design")
-        return web.json_response(self.design_payload())
+        type_id, _, _ = self.design_ctx((await self.body(request)).get("type_id"))
+        return web.json_response(self.design_payload(type_id))
 
-    async def pending_payload(self, previous=None, hint=None, previous_name=None) -> dict:
-        size = await asyncio.to_thread(image_size, self.config.pending_path)
+    async def pending_payload(
+        self, pending: Path, previous=None, hint=None, previous_name=None
+    ) -> dict:
+        size = await asyncio.to_thread(image_size, pending)
         box, name, source, problem = await locate_box(
-            self.config, self.db, size, previous, hint, previous_name
+            self.config, self.db, size, previous, hint, previous_name, path=pending
         )
         if box is None:  # ставим в центр — админ поправит на картинке
             side = min(size) // 3
@@ -663,22 +718,24 @@ class WebApi:
 
     async def design_upload(self, request: web.Request) -> web.Response:
         self.need(request, "design")
+        _, _, pending = self.design_ctx(request.query.get("type_id"))
         raw = await request.read()
         if not raw:
             raise ApiError("Файл пустой")
         try:
-            await asyncio.to_thread(save_template, raw, self.config.pending_path)
+            await asyncio.to_thread(save_template, raw, pending)
         except (UnidentifiedImageError, OSError):
             raise ApiError("Не удалось открыть картинку. Нужен PNG или JPG.")
-        return web.json_response(await self.pending_payload())
+        return web.json_response(await self.pending_payload(pending))
 
-    def pending_size(self) -> tuple[int, int]:
-        if not self.config.pending_path.exists():
+    @staticmethod
+    def pending_size(pending: Path) -> tuple[int, int]:
+        if not pending.exists():
             raise ApiError("Черновик дизайна не найден, загрузите картинку заново", 404)
-        return image_size(self.config.pending_path)
+        return image_size(pending)
 
-    def pending_box(self, data: dict):
-        size = self.pending_size()
+    def pending_box(self, data: dict, pending: Path):
+        size = self.pending_size(pending)
         try:
             raw = [float(v) for v in data.get("box", [])]
         except (TypeError, ValueError):
@@ -687,13 +744,13 @@ class WebApi:
             raise ApiError("Не указано место под QR")
         return clamp_box(tuple(raw), *size)
 
-    def pending_name(self, data: dict) -> dict | None:
+    def pending_name(self, data: dict, pending: Path) -> dict | None:
         """Раскладка ФИ из запроса приложения: рамка, выравнивание, цвет; None — ФИ отключено."""
         entry = data.get("name")
         if not isinstance(entry, dict) or not entry.get("enabled"):
             return None
         try:
-            box = clamp_name_box([float(v) for v in entry.get("box", [])], *self.pending_size())
+            box = clamp_name_box([float(v) for v in entry.get("box", [])], *self.pending_size(pending))
         except (TypeError, ValueError):
             raise ApiError("Некорректное место под ФИ")
         color = entry.get("color")
@@ -706,41 +763,56 @@ class WebApi:
     async def design_retry(self, request: web.Request) -> web.Response:
         self.need(request, "design")
         data = await self.body(request)
-        previous = self.pending_box(data)
+        _, _, pending = self.design_ctx(data.get("type_id"))
+        previous = self.pending_box(data, pending)
         hint = str(data.get("hint", "")).strip() or None
         return web.json_response(
-            await self.pending_payload(previous, hint, self.pending_name(data))
+            await self.pending_payload(pending, previous, hint, self.pending_name(data, pending))
         )
 
     async def design_save(self, request: web.Request) -> web.Response:
         self.need(request, "design")
         data = await self.body(request)
-        box, name = self.pending_box(data), self.pending_name(data)
-        shutil.move(self.config.pending_path, self.config.template_path)
-        self.db.set_setting("template_box", list(box))
-        self.db.set_setting("template_name", name or {"enabled": False})
-        return web.json_response(self.design_payload())
+        type_id, final, pending = self.design_ctx(data.get("type_id"))
+        box, name = self.pending_box(data, pending), self.pending_name(data, pending)
+        shutil.move(pending, final)
+        if type_id:
+            self.db.update_type(
+                type_id, has_design=1, design_box=json.dumps(list(box)),
+                design_name=json.dumps(name or {"enabled": False}),
+            )
+        else:
+            self.db.set_setting("template_box", list(box))
+            self.db.set_setting("template_name", name or {"enabled": False})
+        return web.json_response(self.design_payload(type_id))
 
     async def design_cancel(self, request: web.Request) -> web.Response:
         self.need(request, "design")
-        self.config.pending_path.unlink(missing_ok=True)
-        return web.json_response(self.design_payload())
+        type_id, _, pending = self.design_ctx((await self.body(request)).get("type_id"))
+        pending.unlink(missing_ok=True)
+        return web.json_response(self.design_payload(type_id))
 
     async def design_default(self, request: web.Request) -> web.Response:
+        """Вернуть стандартный дизайн (для типа — убрать его свой дизайн: будет общий)."""
         self.need(request, "design")
-        self.db.delete_setting("template_box")
-        self.db.delete_setting("template_name")
-        self.config.template_path.unlink(missing_ok=True)
-        return web.json_response(self.design_payload())
+        type_id, final, _ = self.design_ctx((await self.body(request)).get("type_id"))
+        if type_id:
+            self.db.update_type(type_id, has_design=0, design_box=None, design_name=None)
+        else:
+            self.db.delete_setting("template_box")
+            self.db.delete_setting("template_name")
+        final.unlink(missing_ok=True)
+        return web.json_response(self.design_payload(type_id))
 
     async def design_image(self, request: web.Request) -> web.Response:
         """Предпросмотр: текущий дизайн или черновик с QR и примером ФИ в указанных местах."""
         self.need(request, "design")
         data = await self.body(request)
+        type_id, _, pending = self.design_ctx(data.get("type_id"))
         if data.get("pending"):
-            path, box, name = self.config.pending_path, self.pending_box(data), self.pending_name(data)
+            path, box, name = pending, self.pending_box(data, pending), self.pending_name(data, pending)
         else:
-            path, box, name = current_template(self.db, self.config)
+            path, box, name = current_template(self.db, self.config, type_id)
         jpeg = await asyncio.to_thread(self.preview_jpeg, path, box, name)
         return web.Response(body=jpeg, content_type="image/jpeg")
 
@@ -758,6 +830,233 @@ class WebApi:
         img.save(out, format="JPEG", quality=86)
         return out.getvalue()
 
+    # ---------- типы билетов ----------
+
+    @staticmethod
+    def pay_url_value(raw) -> str:
+        value = str(raw or "").strip()
+        if value and not re.fullmatch(r'https://[^\s<>"]{4,500}', value):
+            raise ApiError("Ссылка оплаты должна начинаться с https://")
+        return value
+
+    def type_json(self, item: dict) -> dict:
+        t = item["row"]
+        return {
+            "id": t["id"], "title": t["title"], "description": t["description"],
+            "price": t["price"], "price_text": money(t["price"]), "quantity": t["quantity"],
+            "active": bool(t["active"]), "pay_url": t["pay_url"], "has_design": bool(t["has_design"]),
+            "sold": item["sold"], "pending": item["pending"], "left": item["left"],
+            "revenue": item["revenue"], "revenue_text": money(item["revenue"]),
+        }
+
+    async def types_list(self, request: web.Request) -> web.Response:
+        return web.json_response({
+            "types": [self.type_json(i) for i in self.db.types_overview()],
+            "default_pay_url": self.db.get_setting("shop_pay_url") or "",
+            "shop_enabled": shop.shop_enabled(self.db),
+        })
+
+    async def types_save(self, request: web.Request) -> web.Response:
+        self.need_main(request)
+        data = await self.body(request)
+        title = clean(str(data.get("title", "")), 60)
+        if not title:
+            raise ApiError("Введите название билета")
+        try:
+            price = int(data.get("price"))
+        except (TypeError, ValueError):
+            raise ApiError("Цена — целое число тенге")
+        if not 1 <= price <= 10_000_000:
+            raise ApiError("Цена — от 1 до 10 000 000 ₸")
+        raw_qty = data.get("quantity")
+        if raw_qty in (None, ""):
+            quantity = None
+        else:
+            try:
+                quantity = int(raw_qty)
+            except (TypeError, ValueError):
+                raise ApiError("Количество — целое число (или пусто — без лимита)")
+            if not 0 <= quantity <= 1_000_000:
+                raise ApiError("Количество — от 0 до 1 000 000")
+        fields = {
+            "title": title, "description": clean(str(data.get("description", "")), 300),
+            "price": price, "quantity": quantity, "pay_url": self.pay_url_value(data.get("pay_url")),
+            "active": int(bool(data.get("active", True))),
+        }
+        if data.get("id"):
+            if not self.db.get_type(int(data["id"])):
+                raise ApiError("Тип билета не найден", 404)
+            self.db.update_type(int(data["id"]), **fields)
+            type_id = int(data["id"])
+        else:
+            type_id = self.db.add_type(
+                fields["title"], fields["description"], price, quantity, fields["pay_url"],
+                bool(fields["active"]),
+            )
+        return web.json_response({"id": type_id, **await self._types_payload()})
+
+    async def _types_payload(self) -> dict:
+        return {"types": [self.type_json(i) for i in self.db.types_overview()]}
+
+    async def types_delete(self, request: web.Request) -> web.Response:
+        self.need_main(request)
+        try:
+            type_id = int((await self.body(request)).get("id"))
+        except (TypeError, ValueError):
+            raise ApiError("Тип билета не найден", 404)
+        if not self.db.get_type(type_id):
+            raise ApiError("Тип билета не найден", 404)
+        if self.db.type_usage(type_id):
+            raise ApiError("С этим типом уже есть билеты или заказы — его можно только скрыть (выключить).")
+        self.db.delete_type(type_id)
+        for path in design_paths(self.config, type_id):
+            path.unlink(missing_ok=True)
+        return web.json_response(await self._types_payload())
+
+    async def types_move(self, request: web.Request) -> web.Response:
+        """Порядок типов в каталоге клиента: сдвиг вверх (-1) или вниз (1)."""
+        self.need_main(request)
+        data = await self.body(request)
+        ids = [t["id"] for t in self.db.list_types()]
+        try:
+            i, step = ids.index(int(data.get("id"))), (-1 if int(data.get("dir")) < 0 else 1)
+        except (TypeError, ValueError):
+            raise ApiError("Тип билета не найден", 404)
+        if 0 <= i + step < len(ids):
+            ids[i], ids[i + step] = ids[i + step], ids[i]
+        for n, type_id in enumerate(ids):
+            self.db.update_type(type_id, sort=n)
+        return web.json_response(await self._types_payload())
+
+    # ---------- оплаты на проверку ----------
+
+    def order_json(self, o, overview=None, detail: bool = False) -> dict:
+        info = receipts.Receipt.from_dict(json.loads(o["receipt_info"] or "{}"))
+        ticket = self.db.get_ticket(o["ticket_id"]) if o["ticket_id"] else None
+        out = {
+            "id": o["id"], "status": o["status"], "type_id": o["type_id"], "type_title": o["type_title"],
+            "price": o["price"], "price_text": money(o["price"]), "full_name": o["full_name"],
+            "phone": o["phone"], "university": o["university"], "username": o["username"],
+            "tg_name": o["tg_name"], "user_id": o["user_id"],
+            "submitted_at": fmt_dt(o["submitted_at"], self.config) if o["submitted_at"] else "",
+            "reviewed_at": fmt_dt(o["reviewed_at"], self.config) if o["reviewed_at"] else "",
+            "reviewed_by": o["reviewed_by"], "reject_reason": o["reject_reason"],
+            "ticket_id": o["ticket_id"], "ticket_code": ticket_code(self.config, o["ticket_id"]) if ticket else "",
+            "delivered": bool(o["delivered"]), "has_receipt": bool(o["receipt_file"]),
+            "receipt": {
+                "amount": money(info.amount) if info.amount is not None else "", "number": info.number,
+                "buyer": info.buyer, "paid_at": info.paid_at.replace("T", " "), "method": info.method,
+                "seller": info.seller, "pages": info.pages,
+            },
+        }
+        flags = shop.review_flags(self.db, self.config, o, overview) if o["status"] in ("pending", "rejected") or detail else []
+        out["worst"] = "bad" if any(f["level"] == "bad" for f in flags) else "warn" if any(f["level"] == "warn" for f in flags) else "ok"
+        if detail:
+            out["flags"] = flags
+        return out
+
+    def get_order(self, data: dict):
+        try:
+            order = self.db.get_order(int(data.get("id")))
+        except (TypeError, ValueError):
+            order = None
+        if not order or order["status"] not in ("pending", "approved", "rejected"):
+            raise ApiError("Заказ не найден", 404)
+        return order
+
+    async def payments_list(self, request: web.Request) -> web.Response:
+        self.need(request, "payments")
+        status = str((await self.body(request)).get("status", "pending"))
+        if status not in ("pending", "approved", "rejected", "all"):
+            raise ApiError("Некорректный фильтр")
+        overview = self.db.types_overview()
+        orders = self.db.orders_by_status(None if status == "all" else status, 150)
+        counts = self.db.order_counts()
+        return web.json_response({
+            "orders": [self.order_json(o, overview) for o in orders],
+            "counts": {k: counts.get(k, 0) for k in ("pending", "approved", "rejected")},
+        })
+
+    async def payments_get(self, request: web.Request) -> web.Response:
+        self.need(request, "payments")
+        order = self.get_order(await self.body(request))
+        return web.json_response({"order": self.order_json(order, detail=True)})
+
+    async def payments_receipt(self, request: web.Request) -> web.Response:
+        """Страница PDF-чека картинкой (внутри Telegram PDF не открывается)."""
+        self.need(request, "payments")
+        data = await self.body(request)
+        order = self.get_order(data)
+        path = shop.receipt_path(self.config, order) if order["receipt_file"] else None
+        if not path or not path.exists():
+            raise ApiError("Файл чека не найден", 404)
+        try:
+            page = int(data.get("page", 0))
+        except (TypeError, ValueError):
+            page = 0
+        raw = await asyncio.to_thread(path.read_bytes)
+        try:
+            jpeg = await asyncio.to_thread(receipts.render_page, raw, page)
+        except receipts.ReceiptError as e:
+            raise ApiError(str(e))
+        return web.Response(body=jpeg, content_type="image/jpeg")
+
+    async def payments_receipt_file(self, request: web.Request) -> web.Response:
+        """Присылает оригинал PDF-чека админу в чат."""
+        self.need(request, "payments")
+        order = self.get_order(await self.body(request))
+        path = shop.receipt_path(self.config, order) if order["receipt_file"] else None
+        if not path or not path.exists():
+            raise ApiError("Файл чека не найден", 404)
+        await self.bot.send_document(
+            request["user"].id,
+            BufferedInputFile(await asyncio.to_thread(path.read_bytes), filename=f"check_order_{order['id']}.pdf"),
+            caption=f"Чек по заказу №{order['id']} · {order['full_name']}",
+        )
+        return web.json_response({"sent": True})
+
+    async def payments_approve(self, request: web.Request) -> web.Response:
+        access = self.need(request, "payments")
+        order = self.get_order(await self.body(request))
+        try:
+            ticket, order = shop.approve_order(self.db, order["id"], request["user"].full_name)
+        except ShopError as e:
+            raise ApiError(str(e), 409)
+        delivered = await shop.deliver_ticket(
+            self.bot, self.db, self.config, self.bot_username, order, ticket
+        )
+        return web.json_response({
+            "order": self.order_json(self.db.get_order(order["id"]), detail=True),
+            "ticket": self.ticket_json(ticket, access), "delivered": delivered,
+        })
+
+    async def payments_reject(self, request: web.Request) -> web.Response:
+        self.need(request, "payments")
+        data = await self.body(request)
+        order = self.get_order(data)
+        try:
+            order = shop.reject_order(
+                self.db, order["id"], request["user"].full_name, str(data.get("reason", ""))
+            )
+        except ShopError as e:
+            raise ApiError(str(e), 409)
+        await shop.notify_rejected(self.bot, order, order["reject_reason"])
+        return web.json_response({"order": self.order_json(order, detail=True)})
+
+    async def payments_resend(self, request: web.Request) -> web.Response:
+        """Повторно присылает клиенту билет (если не дошёл или клиент потерял)."""
+        self.need(request, "payments")
+        order = self.get_order(await self.body(request))
+        ticket = self.db.get_ticket(order["ticket_id"]) if order["status"] == "approved" and order["ticket_id"] else None
+        if not ticket:
+            raise ApiError("У этого заказа нет выданного билета", 409)
+        delivered = await shop.deliver_ticket(
+            self.bot, self.db, self.config, self.bot_username, order, ticket
+        )
+        return web.json_response({
+            "delivered": delivered, "order": self.order_json(self.db.get_order(order["id"]), detail=True),
+        })
+
     # ---------- настройки (только главный администратор) ----------
 
     def settings_payload(self) -> dict:
@@ -769,6 +1068,11 @@ class WebApi:
             "text_model": self.db.get_setting("groq_text_model") or "",
             "vision_auto": ai.remembered("vision") or "",
             "text_auto": ai.remembered("text") or "",
+            "shop_enabled": shop.shop_enabled(self.db),
+            "shop_pay_url": self.db.get_setting("shop_pay_url") or "",
+            "shop_bin": self.db.get_setting("shop_bin") or "",
+            "shop_welcome": self.db.get_setting("shop_welcome") or "",
+            "welcome_default": shop.DEFAULT_WELCOME,
             "vision_default": self.config.groq_model,
             "text_default": self.config.groq_text_model,
         }
@@ -793,6 +1097,17 @@ class WebApi:
                 self.db.set_setting("groq_api_key", key)
             else:
                 self.db.delete_setting("groq_api_key")
+        if "shop_enabled" in data:
+            self.db.set_setting("shop_enabled", bool(data["shop_enabled"]))
+        if "shop_pay_url" in data:
+            self.db.set_setting("shop_pay_url", self.pay_url_value(data["shop_pay_url"]))
+        if "shop_bin" in data:
+            value = str(data["shop_bin"]).strip()
+            if value and not re.fullmatch(r"\d{12}", value):
+                raise ApiError("ИИН/БИН — 12 цифр")
+            self.db.set_setting("shop_bin", value)
+        if "shop_welcome" in data:
+            self.db.set_setting("shop_welcome", clean(str(data["shop_welcome"]), 500))
         for field, kind in (("vision_model", "vision"), ("text_model", "text")):
             if field in data:
                 model = str(data[field]).strip()
@@ -820,7 +1135,17 @@ class WebApi:
 
     # ---------- сброс ----------
 
+    async def reset_info(self, request: web.Request) -> web.Response:
+        self.need(request, "reset")
+        counts = self.db.order_counts()
+        return web.json_response({
+            "tickets": len(self.db.all_tickets()),
+            "orders": sum(counts.values()),
+            "pending": counts.get("pending", 0),
+        })
+
     async def reset(self, request: web.Request) -> web.Response:
+        """Полный сброс: билеты и все заказы с чеками. Типы билетов и настройки остаются."""
         self.need(request, "reset")
         if self.db.all_tickets():
             # Сначала резервная копия: если она не отправится, ничего не удаляем.
@@ -829,4 +1154,6 @@ class WebApi:
                 export_file(self.db, self.config),
                 caption="Резервная копия списка перед сбросом",
             )
+        for name in self.db.reset_orders():
+            (self.config.receipts_dir / name).unlink(missing_ok=True)
         return web.json_response({"deleted": self.db.reset_tickets()})
