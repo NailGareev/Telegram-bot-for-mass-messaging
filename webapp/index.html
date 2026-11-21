@@ -287,6 +287,7 @@
   }
   // Значок кнопки-действия: по её id или по атрибуту data-icon.
   var BUTTON_ICONS = {
+    topup: "plus",
     list: "list",
     submit: "ticket", again: "plus", home: "home", scan: "scan", "export": "download", send: "send",
     unscan: "undo", "delete": "trash", remove: "trash", upload: "upload", "default": "undo",
@@ -647,11 +648,11 @@
     on("#tabs .btn", "click", function () { params.tab = this.dataset.tab; render(); });
   }
 
-  var ORDER_STATUS = { pending: "На проверке", approved: "Принята", rejected: "Отклонена" };
+  var ORDER_STATUS = { topup: "Ждёт доплаты", pending: "На проверке", approved: "Принята", rejected: "Отклонена" };
 
   function paymentsView(params) {
     params.filter = params.filter || "pending";
-    var pills = [["pending", "Ожидают"], ["approved", "Принятые"], ["rejected", "Отклонённые"]];
+    var pills = [["pending", "Ожидают"], ["topup", "Доплата"], ["approved", "Принятые"], ["rejected", "Отклонённые"]];
     app.innerHTML = header("Проверка оплат", "Список") + listTabs(params) +
       '<div class="pills" id="pills">' + pills.map(function (p) {
         return '<button type="button" class="pill' + (params.filter === p[0] ? " on" : "") + '" data-f="' + p[0] + '">' + p[1] + "</button>";
@@ -664,11 +665,11 @@
       var tab = $("#tabs .btn[data-tab=payments]");
       if (tab) tab.textContent = "Оплаты" + (r.counts.pending ? " · " + r.counts.pending : "");
       $("#items").innerHTML = r.orders.map(function (o) {
-        var chipHtml = o.status === "approved" ? '<span class="chip ok">принята</span>' : o.status === "rejected" ? '<span class="chip wait">отклонена</span>'
+        var chipHtml = o.status === "approved" ? '<span class="chip ok">принята</span>' : o.status === "rejected" ? '<span class="chip wait">отклонена</span>' : o.status === "topup" ? '<span class="chip warn">не хватает ' + esc(o.short_text) + "</span>"
           : o.worst === "bad" ? '<span class="chip warn">проверьте</span>' : o.worst === "warn" ? '<span class="chip warn">замечания</span>' : '<span class="chip ok">сверка ок</span>';
         return '<button class="item" data-id="' + o.id + '"><div class="main"><b><span class="code">№' + o.id + "</span> " + esc(o.full_name) + "</b><span>" +
           esc(o.type_title) + " · " + esc(o.price_text) + (o.submitted_at ? " · " + esc(o.submitted_at) : "") + "</span></div>" + chipHtml + ic("chevron") + "</button>";
-      }).join("") || '<p class="loading">' + ({ pending: "Оплат на проверке нет", approved: "Принятых оплат пока нет", rejected: "Отклонённых оплат нет" }[params.filter]) + "</p>";
+      }).join("") || '<p class="loading">' + ({ pending: "Оплат на проверке нет", topup: "Заказов, ожидающих доплаты, нет", approved: "Принятых оплат пока нет", rejected: "Отклонённых оплат нет" }[params.filter]) + "</p>";
       on(".item", "click", function () { go("payment", { id: Number(this.dataset.id) }); });
     }).catch(function (error) { if ($("#items")) { $("#items").innerHTML = ""; failed(error); } });
   }
@@ -679,27 +680,39 @@
   };
 
   function showPayment(params, o) {
-    var rc = o.receipt;
-    var rows = [["Билет", esc(o.type_title) + " · " + esc(o.price_text)], ["ФИ", esc(o.full_name)], ["Телефон", esc(o.phone || "—")], ["Университет", esc(o.university || "—")],
-      ["Telegram", o.username ? "@" + esc(o.username) : esc(o.tg_name || "—")], ["Отправлено", esc(o.submitted_at || "—")]];
-    if (o.status !== "pending") rows.push(["Проверил", esc(o.reviewed_by || "—") + (o.reviewed_at ? " · " + esc(o.reviewed_at) : "")]);
+    var rows = [["Билет", esc(o.type_title) + " · " + esc(o.price_text)], ["ФИ", esc(o.full_name || "ещё не указано")], ["Телефон", esc(o.phone || "—")], ["Университет", esc(o.university || "—")],
+      ["Telegram", o.username ? "@" + esc(o.username) : esc(o.tg_name || "—")], ["Отправлено", esc(o.submitted_at || "—")],
+      ["Оплачено", "<b>" + esc(o.paid_text) + "</b> из " + esc(o.price_text) + (o.short ? ' · <span style="color:var(--bad)">не хватает ' + esc(o.short_text) + "</span>" : "")]];
+    if (o.status !== "pending" && o.status !== "topup") rows.push(["Проверил", esc(o.reviewed_by || "—") + (o.reviewed_at ? " · " + esc(o.reviewed_at) : "")]);
     if (o.status === "rejected") rows.push(["Причина", esc(o.reject_reason || "не указана")]);
     if (o.status === "approved") rows.push(["Билет", '<span class="code">' + esc(o.ticket_code) + "</span> · " + (o.delivered ? "доставлен клиенту" : "не доставлен клиенту")]);
-    var recog = [["Сумма", rc.amount], ["№ чека", rc.number], ["Дата", rc.paid_at], ["Покупатель", rc.buyer], ["Способ", rc.method], ["Получатель", rc.seller]].filter(function (x) { return x[1]; });
+    var live = o.receipts.filter(function (r) { return !r.void; });
+    var receiptsHtml = o.receipts.map(function (r, i) {
+      var recog = [["Сумма", r.amount], ["№ чека", r.number], ["Дата", r.paid_at], ["Покупатель", r.buyer], ["Способ", r.method], ["Получатель", r.seller]].filter(function (x) { return x[1]; });
+      return "<h2>Чек " + (i + 1) + (o.receipts.length > 1 ? " из " + o.receipts.length : "") + (r.void ? " · отозван" : "") + '</h2><img class="receipt" data-rid="' + r.id + '" alt="Чек об оплате" style="' + (r.void ? "opacity:.45" : "") + '">' +
+        (recog.length ? '<div class="card"><dl>' + recog.map(function (x) { return "<dt>" + x[0] + "</dt><dd>" + esc(x[1]) + "</dd>"; }).join("") + "</dl></div>" : "");
+    }).join("");
     app.innerHTML = header(ORDER_STATUS[o.status], "Оплата №" + o.id) +
-      (o.has_receipt ? '<img class="receipt" id="receiptImg" alt="Чек об оплате">' : "") +
       '<div class="card"><dl>' + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") + "</dl></div>" +
-      (o.flags && o.flags.length ? "<h2>Сверка</h2><div class=\"card\">" + o.flags.map(function (f) { return '<div class="flag ' + f.level + '"><i></i><span>' + esc(f.text) + "</span></div>"; }).join("") + "</div>" : "") +
-      (recog.length ? "<h2>Распознано в чеке</h2><div class=\"card\"><dl>" + recog.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + esc(r[1]) + "</dd>"; }).join("") + "</dl></div>" : "") +
+      (o.flags && o.flags.length ? '<h2>Сверка</h2><div class="card">' + o.flags.map(function (f) { return '<div class="flag ' + f.level + '"><i></i><span>' + esc(f.text) + "</span></div>"; }).join("") + "</div>" : "") +
+      receiptsHtml +
       (o.status === "pending"
-        ? '<button class="btn primary" id="approve">Принять оплату</button><button class="btn danger" id="rejectOpen">Отклонить…</button>' +
-          '<div id="rejectBox" hidden><h2>Причина отказа</h2><div class="reasons">' +
-          ["Оплата не поступила", "Неверная сумма", "Чек не читается", "Повторный чек", "Не тот получатель"].map(function (r) { return '<button type="button" class="pill" data-reason="' + r + '">' + r + "</button>"; }).join("") +
-          '</div><textarea id="reason" maxlength="300" placeholder="Что сказать клиенту (необязательно)"></textarea><button class="btn danger" id="reject" style="margin-top:12px">Отклонить оплату</button></div>'
+        ? '<button class="btn primary" id="approve">Принять оплату</button>' +
+          (o.short ? '<button class="btn" id="topup">Запросить доплату (' + esc(o.short_text) + ")</button>" : "") +
+          '<button class="btn danger" id="rejectOpen">Отклонить…</button>'
+        : o.status === "topup" ? '<button class="btn" id="topup">Напомнить клиенту о доплате</button><button class="btn danger" id="rejectOpen">Отменить заказ…</button>'
         : o.status === "approved" ? '<button class="btn" id="resend">Прислать билет клиенту снова</button>' : "") +
-      (o.has_receipt ? '<button class="btn" id="pdf">Прислать PDF-чек в чат</button>' : "");
-    if (o.has_receipt) apiImage("payments/receipt", { id: o.id }).then(function (url) { var img = $("#receiptImg"); if (img) img.src = url; }).catch(function () { var img = $("#receiptImg"); if (img) img.remove(); });
-    function done(r, message) { params.order = r.order; me.pending_payments = Math.max(0, (me.pending_payments || 1) - 1); toast(message); showPayment(params, r.order); }
+      (o.status === "pending" || o.status === "topup" ? '<div id="rejectBox" hidden><h2>Причина</h2><div class="reasons">' +
+          ["Оплата не поступила", "Неверная сумма", "Чек не читается", "Повторный чек", "Не тот получатель"].map(function (r) { return '<button type="button" class="pill" data-reason="' + r + '">' + r + "</button>"; }).join("") +
+          '</div><textarea id="reason" maxlength="300" placeholder="Что сказать клиенту (необязательно)"></textarea><button class="btn danger" id="reject" style="margin-top:12px">Отклонить оплату</button>' +
+          '<p class="muted small">Чеки заказа будут отозваны: клиенту придётся прислать новый чек на полную сумму.</p></div>' : "") +
+      (live.length ? '<button class="btn" id="pdf">Прислать PDF-чек' + (live.length > 1 ? "и" : "") + " в чат</button>" : "");
+    o.receipts.forEach(function (r) {
+      apiImage("payments/receipt", { id: o.id, receipt_id: r.id }).then(function (url) {
+        var img = document.querySelector('img[data-rid="' + r.id + '"]'); if (img) img.src = url;
+      }).catch(function () { var img = document.querySelector('img[data-rid="' + r.id + '"]'); if (img) img.remove(); });
+    });
+    function done(r, message) { params.order = r.order; refreshMe(); toast(message); showPayment(params, r.order); }
     on("#approve", "click", function () {
       var button = this;
       var worry = (o.flags || []).some(function (f) { return f.level === "bad"; });
@@ -709,6 +722,15 @@
           return api("payments/approve", { id: o.id }).then(function (r) {
             haptic("success"); done(r, r.delivered ? "Оплата принята, билет отправлен клиенту" : "Оплата принята, но билет не доставлен — клиент мог заблокировать бота");
           });
+        });
+      });
+    });
+    on("#topup", "click", function () {
+      var button = this;
+      confirmBox(o.status === "topup" ? "Напомнить клиенту, что нужно доплатить " + o.short_text + "?" : "Попросить клиента доплатить " + o.short_text + "? Заказ уйдёт из проверки, пока он не пришлёт ещё один чек.").then(function (yes) {
+        if (!yes) return;
+        run(button, function () {
+          return api("payments/topup", { id: o.id }).then(function (r) { done(r, r.sent ? "Клиент получил просьбу о доплате" : "Не удалось отправить: клиент мог заблокировать бота"); });
         });
       });
     });
@@ -974,7 +996,9 @@
       '<label class="field"><span>Описание · необязательно</span><textarea id="tDesc" maxlength="300" placeholder="Что входит в билет">' + esc(t.description) + "</textarea></label>" +
       '<label class="field"><span>Цена, ₸</span><input id="tPrice" type="text" inputmode="numeric" autocomplete="off" placeholder="1400" value="' + esc(t.price) + '" required></label>' +
       '<label class="field"><span>Сколько билетов можно продать · пусто — без лимита</span><input id="tQty" type="text" inputmode="numeric" autocomplete="off" placeholder="без лимита" value="' + (t.quantity === null || t.quantity === undefined ? "" : esc(t.quantity)) + '"></label>' +
-      '<label class="field"><span>Ссылка оплаты Kaspi для этого билета · пусто — общая</span><input id="tUrl" type="text" inputmode="url" autocomplete="off" autocapitalize="off" placeholder="https://pay.kaspi.kz/…" value="' + esc(t.pay_url) + '"></label>' +
+      '<div class="card" style="padding:14px"><label class="field"><span>Своя ссылка оплаты Kaspi для этого билета · пусто — общая</span><input id="tUrl" type="text" inputmode="url" autocomplete="off" autocapitalize="off" placeholder="https://pay.kaspi.kz/…" value="' + esc(t.pay_url) + '"></label>' +
+      '<label class="field" style="margin:0"><span>ИИН/БИН получателя этой ссылки</span><input id="tBin" type="text" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="12 цифр" value="' + esc(t.pay_bin) + '"></label>' +
+      '<p class="muted small" style="margin:8px 0 0">Бот сверит с ним получателя в чеке и не примет чек, выписанный на другого. Без ИИН/БИН у своей ссылки проверка получателя выключена; если ссылки нет, берутся общая ссылка и её ИИН/БИН из «Настроек».</p></div>' +
       '<div class="card" style="padding:4px 14px"><button type="button" class="switch" role="switch" id="tActive" aria-checked="' + active + '"><span>В продаже (виден клиентам в боте)</span><i></i></button></div>' +
       (t.id ? '<p class="muted small">Продано: ' + t.sold + (t.pending ? ", на проверке: " + t.pending : "") + ", выручка: " + esc(t.revenue_text) + '. Места резервируются, когда оплата отправлена на проверку; билеты, выданные вручную с этим типом, тоже считаются.</p>' : "") +
       '<button class="btn primary" id="typeSave" type="submit">Сохранить</button></form>' +
@@ -985,7 +1009,7 @@
       event.preventDefault();
       run($("#typeSave"), function () {
         return api("types/save", { id: t.id, title: $("#tTitle").value, description: $("#tDesc").value, price: $("#tPrice").value.replace(/\s/g, ""),
-          quantity: $("#tQty").value.replace(/\s/g, ""), pay_url: $("#tUrl").value, active: active }).then(function () { toast("Сохранено"); back(); });
+          quantity: $("#tQty").value.replace(/\s/g, ""), pay_url: $("#tUrl").value, pay_bin: $("#tBin").value.replace(/\s/g, ""), active: active }).then(function () { toast("Сохранено"); back(); });
       });
     });
     on("#typeDesign", "click", function () { go("design", { typeId: t.id }); });
@@ -1013,9 +1037,9 @@
       app.innerHTML = header("Все билеты", "Статистика") + '<div class="stats">' +
         stat(s.total, "выдано билетов") + stat(s.scanned, "прошли на вход") +
         stat(s.waiting, "ещё не пришли") + stat(s.repeats, "с повторным сканированием") + "</div>" +
-        ((s.revenue || s.orders.pending || s.orders.approved || s.orders.rejected) ? "<h2>Продажи в боте</h2><div class=\"stats\">" +
+        ((s.revenue || s.orders.pending || s.orders.approved || s.orders.rejected || s.orders.topup) ? "<h2>Продажи в боте</h2><div class=\"stats\">" +
           stat(s.revenue_text, "выручка (принятые оплаты)") + stat(s.orders.pending || 0, "оплат на проверке") +
-          stat(s.orders.approved || 0, "оплат принято") + stat(s.orders.rejected || 0, "оплат отклонено") + "</div>" : "") +
+          stat(s.orders.approved || 0, "оплат принято") + stat(s.orders.topup || 0, "ждут доплаты") + stat(s.orders.rejected || 0, "оплат отклонено") + "</div>" : "") +
         (s.types.length ? "<h2>По типам билетов</h2><div class=\"card\">" + s.types.map(function (t) {
           return '<div class="rank"><span>' + esc(t.title) + " <span class=\"muted small\">" + esc(t.price) + " · осталось " + (t.left === null ? "∞" : t.left) + "</span></span><b>" + t.sold + "</b></div>";
         }).join("") + "</div>" : "") +
@@ -1259,11 +1283,12 @@
         '<p class="muted small" style="margin-top:10px">Нужен для смены дизайна билета (ИИ находит место под QR-код и под ФИ) и для разбора списков при массовом заливе. Бесплатный ключ — на console.groq.com/keys</p>' +
         '<h2>Магазин в боте</h2><p class="muted small">Клиенты (не админы) пишут боту /start, выбирают билет, оплачивают по ссылке Kaspi и присылают PDF-чек. Типы билетов, цены и количество — в разделе «Типы билетов».</p>' +
         '<form id="shopForm"><div class="card" style="padding:4px 14px"><button type="button" class="switch" role="switch" id="shopOn" aria-checked="' + data.shop_enabled + '"><span>Продажа билетов в боте включена</span><i></i></button></div>' +
-        '<label class="field"><span>Общая ссылка оплаты Kaspi</span><input id="shopUrl" type="text" inputmode="url" autocomplete="off" autocapitalize="off" placeholder="https://pay.kaspi.kz/…" value="' + esc(data.shop_pay_url) + '"></label>' +
-        '<label class="field"><span>ИИН/БИН получателя · необязательно</span><input id="shopBin" type="text" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="12 цифр — бот сверит с чеком" value="' + esc(data.shop_bin) + '"></label>' +
+        '<div class="card" style="padding:14px"><label class="field"><span>Общая ссылка оплаты Kaspi</span><input id="shopUrl" type="text" inputmode="url" autocomplete="off" autocapitalize="off" placeholder="https://pay.kaspi.kz/…" value="' + esc(data.shop_pay_url) + '"></label>' +
+        '<label class="field" style="margin:0"><span>ИИН/БИН получателя этой ссылки</span><input id="shopBin" type="text" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="12 цифр — бот сверит с чеком" value="' + esc(data.shop_bin) + '"></label>' +
+        '<p class="muted small" style="margin:8px 0 0">Ссылка и её ИИН/БИН задаются вместе. Если ИИН/БИН пуст, получателя в чеке бот не проверяет.</p></div>' +
         '<label class="field"><span>Приветствие для клиентов · необязательно</span><textarea id="shopWelcome" maxlength="500" placeholder="' + esc(data.welcome_default) + '">' + esc(data.shop_welcome) + "</textarea></label>" +
         '<button class="btn primary" type="submit" data-icon="check">Сохранить магазин</button></form>' +
-        '<p class="muted small" style="margin-top:10px">Если задан ИИН/БИН, бот не примет чек, выписанный на другого получателя. Ссылку можно задать и отдельно для каждого типа билета.</p>' +
+        '<p class="muted small" style="margin-top:10px">Свою ссылку (и её ИИН/БИН) можно задать отдельно для каждого типа билета.</p>' +
         '<h2>Модели ИИ</h2><p class="muted small">Обычно ничего менять не нужно: если модель по умолчанию недоступна (Groq иногда снимает их с поддержки), бот сам находит рабочую среди моделей вашего ключа и запоминает её. Поля ниже — чтобы выбрать модель вручную; пустое поле — автоматически.</p>' +
         '<form id="modelForm"><label class="field"><span>Модель для картинок (дизайн билета)' + (data.vision_auto ? " — сейчас: " + esc(data.vision_auto) : "") +
         '</span><input id="visionModel" type="text" autocomplete="off" autocapitalize="off" placeholder="' + esc(data.vision_default) + '" value="' + esc(data.vision_model) + '"></label>' +

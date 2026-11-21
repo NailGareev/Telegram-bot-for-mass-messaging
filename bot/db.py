@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS ticket_types (
     quantity    INTEGER,                        -- сколько всего можно продать; NULL — без лимита
     active      INTEGER NOT NULL DEFAULT 1,
     pay_url     TEXT NOT NULL DEFAULT '',       -- своя ссылка оплаты; пусто — общая
+    pay_bin     TEXT NOT NULL DEFAULT '',       -- ИИН/БИН получателя этой ссылки (для сверки чека)
     sort        INTEGER NOT NULL DEFAULT 0,
     has_design  INTEGER NOT NULL DEFAULT 0,     -- свой дизайн (файл data/templates/type_N.png)
     design_box  TEXT,                           -- JSON [x, y, сторона] — место QR
@@ -49,7 +50,7 @@ CREATE TABLE IF NOT EXISTS orders (
     type_id      INTEGER,
     type_title   TEXT NOT NULL,                 -- название и цена на момент заказа
     price        INTEGER NOT NULL,
-    status       TEXT NOT NULL,                 -- chosen, receipt, name, phone, univ, pending, approved, rejected, cancelled
+    status       TEXT NOT NULL,                 -- chosen, receipt, topup, name, phone, univ, pending, approved, rejected, cancelled
     full_name    TEXT NOT NULL DEFAULT '',
     phone        TEXT NOT NULL DEFAULT '',
     university   TEXT NOT NULL DEFAULT '',
@@ -66,6 +67,18 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 CREATE INDEX IF NOT EXISTS orders_user ON orders (user_id, status);
 CREATE INDEX IF NOT EXISTS orders_receipt ON orders (receipt_no);
+CREATE TABLE IF NOT EXISTS order_receipts (    -- у заказа может быть несколько чеков (доплата)
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id   INTEGER NOT NULL,
+    file       TEXT NOT NULL,                   -- имя файла в data/receipts
+    number     TEXT NOT NULL DEFAULT '',        -- номер чека из PDF
+    amount     INTEGER,                         -- сумма из чека; NULL — не распознана
+    info       TEXT NOT NULL DEFAULT '{}',      -- JSON: что распознано в чеке
+    created_at TEXT NOT NULL,
+    void       INTEGER NOT NULL DEFAULT 0       -- 1 — чек отозван админом и не засчитывается
+);
+CREATE INDEX IF NOT EXISTS order_receipts_order ON order_receipts (order_id);
+CREATE INDEX IF NOT EXISTS order_receipts_number ON order_receipts (number);
 CREATE TABLE IF NOT EXISTS admins (
     id       INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id  INTEGER UNIQUE,          -- NULL, пока добавленный по нику не написал боту
@@ -95,6 +108,7 @@ class Database:
         self._migrate_admins()
         self.conn.executescript(SCHEMA)
         self._migrate_tickets()
+        self._migrate_shop()
         self.conn.commit()
 
     def close(self) -> None:
@@ -124,6 +138,26 @@ class Database:
         ):
             if name not in have:
                 self.conn.execute(f"ALTER TABLE tickets ADD COLUMN {name} {ddl}")
+
+    def _migrate_shop(self) -> None:
+        """Для баз, созданных до доплат и привязки ИИН/БИН к ссылке."""
+        have = {r["name"] for r in self.conn.execute("PRAGMA table_info(ticket_types)")}
+        if "pay_bin" not in have:
+            self.conn.execute("ALTER TABLE ticket_types ADD COLUMN pay_bin TEXT NOT NULL DEFAULT ''")
+        # Чек из старой схемы (один на заказ) переезжает в таблицу чеков.
+        for o in self.conn.execute(
+            "SELECT id, receipt_file, receipt_no, receipt_info, created_at FROM orders"
+            " WHERE receipt_file != '' AND id NOT IN (SELECT order_id FROM order_receipts)"
+        ).fetchall():
+            try:
+                amount = json.loads(o["receipt_info"] or "{}").get("amount")
+            except ValueError:
+                amount = None
+            self.conn.execute(
+                "INSERT INTO order_receipts (order_id, file, number, amount, info, created_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (o["id"], o["receipt_file"], o["receipt_no"], amount, o["receipt_info"] or "{}", o["created_at"]),
+            )
 
     # ---------- билеты ----------
 
@@ -233,8 +267,10 @@ class Database:
     def reset_orders(self) -> list[str]:
         """Удаляет все заказы (при полном сбросе). Возвращает имена файлов чеков для удаления."""
         with self.conn:
-            files = [r["receipt_file"] for r in self.conn.execute(
+            files = [r["file"] for r in self.conn.execute("SELECT file FROM order_receipts")]
+            files += [r["receipt_file"] for r in self.conn.execute(
                 "SELECT receipt_file FROM orders WHERE receipt_file != ''")]
+            self.conn.execute("DELETE FROM order_receipts")
             self.conn.execute("DELETE FROM orders")
             self.conn.execute("DELETE FROM sqlite_sequence WHERE name = 'orders'")
         return files
@@ -242,7 +278,7 @@ class Database:
     # ---------- типы билетов ----------
 
     TYPE_FIELDS = {
-        "title", "description", "price", "quantity", "active", "pay_url", "sort",
+        "title", "description", "price", "quantity", "active", "pay_url", "pay_bin", "sort",
         "has_design", "design_box", "design_name",
     }
 
@@ -259,14 +295,14 @@ class Database:
 
     def add_type(
         self, title: str, description: str, price: int, quantity: int | None,
-        pay_url: str, active: bool = True,
+        pay_url: str, active: bool = True, pay_bin: str = "",
     ) -> int:
         with self.conn:
             top = self.conn.execute("SELECT COALESCE(MAX(sort), 0) FROM ticket_types").fetchone()[0]
             cur = self.conn.execute(
                 "INSERT INTO ticket_types (title, description, price, quantity, active, pay_url,"
-                " sort, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                (title, description, price, quantity, int(active), pay_url, top + 1, now_iso()),
+                " pay_bin, sort, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (title, description, price, quantity, int(active), pay_url, pay_bin, top + 1, now_iso()),
             )
         return cur.lastrowid
 
@@ -322,6 +358,7 @@ class Database:
         "ticket_id", "delivered", "type_id", "type_title", "price",
     }
     FLOW = ("chosen", "receipt", "name", "phone", "univ")   # клиент ещё в процессе покупки
+    ACTIVE = FLOW + ("topup",)    # «topup» — внесена часть суммы: заказ ждёт доплаты и не отменяется сам
 
     def create_order(self, user_id: int, username: str | None, tg_name: str, t: sqlite3.Row) -> int:
         with self.conn:
@@ -336,10 +373,10 @@ class Database:
         return self.conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
 
     def active_order(self, user_id: int) -> sqlite3.Row | None:
-        marks = ",".join("?" * len(self.FLOW))
+        marks = ",".join("?" * len(self.ACTIVE))
         return self.conn.execute(
             f"SELECT * FROM orders WHERE user_id = ? AND status IN ({marks}) ORDER BY id DESC LIMIT 1",
-            (user_id, *self.FLOW),
+            (user_id, *self.ACTIVE),
         ).fetchone()
 
     def update_order(self, order_id: int, **fields: Any) -> None:
@@ -384,12 +421,12 @@ class Database:
                 "SELECT * FROM orders WHERE status = ? ORDER BY id DESC LIMIT ?",
                 (status, limit)).fetchall()
         return self.conn.execute(
-            "SELECT * FROM orders WHERE status IN ('pending','approved','rejected')"
+            "SELECT * FROM orders WHERE status IN ('topup','pending','approved','rejected')"
             " ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
 
     def orders_of_user(self, user_id: int, limit: int = 6) -> list[sqlite3.Row]:
         return self.conn.execute(
-            "SELECT * FROM orders WHERE user_id = ? AND status IN ('pending','approved','rejected')"
+            "SELECT * FROM orders WHERE user_id = ? AND status IN ('topup','pending','approved','rejected')"
             " ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
 
     def order_counts(self) -> dict[str, int]:
@@ -400,13 +437,46 @@ class Database:
         return self.conn.execute(
             "SELECT COALESCE(SUM(price), 0) FROM orders WHERE status = 'approved'").fetchone()[0]
 
-    def find_receipt(self, number: str, exclude_id: int = 0) -> sqlite3.Row | None:
-        """Заказ, в котором уже использован чек с таким номером (ждущий проверки или принятый)."""
+    # ---------- чеки заказов ----------
+
+    def add_receipt(self, order_id: int, file: str, number: str, amount: int | None, info: str) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO order_receipts (order_id, file, number, amount, info, created_at)"
+                " VALUES (?,?,?,?,?,?)", (order_id, file, number, amount, info, now_iso()),
+            )
+        return cur.lastrowid
+
+    def receipts_of(self, order_id: int, include_void: bool = False) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM order_receipts WHERE order_id = ?" + ("" if include_void else " AND void = 0")
+        return self.conn.execute(sql + " ORDER BY id", (order_id,)).fetchall()
+
+    def get_receipt(self, receipt_id: int) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM order_receipts WHERE id = ?", (receipt_id,)).fetchone()
+
+    def void_receipts(self, order_id: int) -> None:
+        """Чеки отозваны (оплата не принята): они больше не засчитываются, но остаются в истории."""
+        with self.conn:
+            self.conn.execute("UPDATE order_receipts SET void = 1 WHERE order_id = ?", (order_id,))
+
+    def paid_total(self, order_id: int) -> tuple[int, int]:
+        """(сумма по чекам, число чеков, у которых сумма не распознана)."""
+        rows = self.receipts_of(order_id)
+        return sum(r["amount"] or 0 for r in rows if r["amount"] is not None), sum(1 for r in rows if r["amount"] is None)
+
+    def find_receipt(self, number: str, exclude_order: int = 0) -> sqlite3.Row | None:
+        """Чек с таким номером в другом заказе (ждущем проверки, принятом или ждущем доплаты)."""
         if not number:
             return None
         return self.conn.execute(
-            "SELECT * FROM orders WHERE receipt_no = ? AND id != ? AND status IN ('pending','approved')"
-            " LIMIT 1", (number, exclude_id)).fetchone()
+            "SELECT r.* FROM order_receipts r JOIN orders o ON o.id = r.order_id"
+            " WHERE r.number = ? AND r.order_id != ? AND r.void = 0"
+            " AND o.status IN ('topup','pending','approved') LIMIT 1", (number, exclude_order)).fetchone()
+
+    def order_has_receipt(self, order_id: int, number: str) -> bool:
+        return bool(number) and self.conn.execute(
+            "SELECT 1 FROM order_receipts WHERE order_id = ? AND number = ? AND void = 0",
+            (order_id, number)).fetchone() is not None
 
     # ---------- администраторы ----------
 

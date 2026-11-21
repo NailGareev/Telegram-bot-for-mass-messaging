@@ -31,6 +31,7 @@ from ..shop import money
 router = Router()
 
 STATUS_TEXT = {
+    "topup": "💳 нужна доплата",
     "pending": "⏳ на проверке",
     "approved": "✅ оплата принята",
     "rejected": "❌ не принята",
@@ -81,6 +82,9 @@ def catalog_view(db: Database, user_id: int):
                 continue
             tail = "" if item["left"] is None else f" · осталось {item['left']}"
             rows.append([button(f"{t['title']} — {money(t['price'])}{tail}", f"shop:t:{t['id']}")])
+    for o in db.orders_of_user(user_id, 6):
+        if o["status"] == "topup":
+            rows.append([button(f"💳 Доплатить заказ №{o['id']}", f"shop:topup:{o['id']}")])
     if db.orders_of_user(user_id, 1):
         rows.append([button("🧾 Мои заказы", "shop:orders")])
     return text, (kb(*rows) if rows else None)
@@ -190,6 +194,10 @@ async def paid(cb: CallbackQuery, bot: Bot, db: Database):
 @router.callback_query(F.data.regexp(r"^shop:cancel:\d+$"))
 async def cancel(cb: CallbackQuery, bot: Bot, db: Database):
     order = own_order(db, cb)
+    if order and order["status"] == "topup":
+        return await cb.answer(
+            "По этому заказу уже внесены деньги — отменить его может только организатор.", show_alert=True
+        )
     if order and order["status"] in db.FLOW:
         db.update_order(order["id"], status="cancelled")
     await cb.answer("Заказ отменён")
@@ -205,7 +213,7 @@ def is_pdf(doc) -> bool:
     return (doc.mime_type == "application/pdf") or (doc.file_name or "").lower().endswith(".pdf")
 
 
-@router.message(F.document, HasOrder("receipt"))
+@router.message(F.document, HasOrder("receipt", "topup"))
 async def receipt_file(
     message: Message, bot: Bot, db: Database, config: Config, order, hub: Hub
 ):
@@ -238,23 +246,26 @@ async def receipt_file(
     config.receipts_dir.mkdir(parents=True, exist_ok=True)
     name = shop.new_receipt_name(order["id"])
     (config.receipts_dir / name).write_bytes(raw)
-    if order["receipt_file"]:
-        (config.receipts_dir / order["receipt_file"]).unlink(missing_ok=True)
-    db.update_order(
-        order["id"], receipt_file=name, receipt_no=receipt.number,
-        receipt_info=json.dumps(receipt.to_dict(), ensure_ascii=False),
-    )
+    db.add_receipt(order["id"], name, receipt.number, receipt.amount, json.dumps(receipt.to_dict(), ensure_ascii=False))
     order = db.get_order(order["id"])
+    paid, _, short = shop.coverage(db, order)
+    if short > 0:
+        # Клиент ошибся с суммой: заказ ждёт доплаты, чеки складываются
+        db.update_order(order["id"], status="topup")
+        got = f"✅ Чек получен: {money(receipt.amount)}." if receipt.amount is not None else "✅ Чек получен."
+        await shop.notify_topup(bot, db, db.get_order(order["id"]), got)
+        return
+    intro = "✅ Чек получен." + (f" Оплачено {money(paid)} из {money(order['price'])}." if paid and paid != order["price"] else "")
     if order["full_name"] and order["phone"] and order["university"]:   # повторный чек: данные уже есть
         return await submit(bot, db, config, order, hub)
     db.update_order(order["id"], status="name")
     await message.answer(
-        "✅ Чек получен.\n\nТеперь введите ваши <b>фамилию и имя</b>:",
+        f"{intro}\n\nТеперь введите ваши <b>фамилию и имя</b>:",
         reply_markup=kb(CANCEL_ROW(order["id"])),
     )
 
 
-@router.message(HasOrder("receipt"))
+@router.message(HasOrder("receipt", "topup"))
 async def receipt_not_file(message: Message):
     await message.answer(
         "Жду PDF-чек. Пришлите его <b>файлом</b> (скрепка → «Файл»). Скриншот или фото не подойдут."
@@ -342,6 +353,8 @@ async def my_orders(cb: CallbackQuery, bot: Bot, db: Database):
         if o["status"] == "rejected" and o["reject_reason"]:
             line += f"\n   Причина: {escape(o['reject_reason'])}"
         lines.append(line)
+        if o["status"] == "topup":
+            rows.append([button(f"💳 Доплатить (№{o['id']})", f"shop:topup:{o['id']}")])
         if o["status"] == "approved" and o["ticket_id"]:
             rows.append([button(f"🎟 Прислать билет №{o['id']}", f"shop:send:{o['id']}")])
         if o["status"] == "rejected":
@@ -360,6 +373,17 @@ async def resend(
         return await cb.answer("Билет не найден", show_alert=True)
     await cb.answer("Отправляю билет…")
     await shop.deliver_ticket(bot, db, config, bot_username, order, ticket)
+
+
+@router.callback_query(F.data.regexp(r"^shop:topup:\d+$"))
+async def topup(cb: CallbackQuery, bot: Bot, db: Database):
+    order = own_order(db, cb)
+    if not order or order["status"] != "topup":
+        return await cb.answer("Этот заказ уже не ждёт доплаты", show_alert=True)
+    await cb.answer()
+    db.cancel_flow_orders(cb.from_user.id)   # чтобы этот заказ стал активным
+    await drop(cb)
+    await shop.notify_topup(bot, db, order)
 
 
 @router.callback_query(F.data.regexp(r"^shop:retry:\d+$"))

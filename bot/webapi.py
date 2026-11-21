@@ -101,6 +101,7 @@ class WebApi:
             "payments/get": self.payments_get,
             "payments/receipt": self.payments_receipt,
             "payments/receipt_file": self.payments_receipt_file,
+            "payments/topup": self.payments_topup,
             "payments/approve": self.payments_approve,
             "payments/reject": self.payments_reject,
             "payments/resend": self.payments_resend,
@@ -844,7 +845,8 @@ class WebApi:
         return {
             "id": t["id"], "title": t["title"], "description": t["description"],
             "price": t["price"], "price_text": money(t["price"]), "quantity": t["quantity"],
-            "active": bool(t["active"]), "pay_url": t["pay_url"], "has_design": bool(t["has_design"]),
+            "active": bool(t["active"]), "pay_url": t["pay_url"], "pay_bin": t["pay_bin"],
+            "has_design": bool(t["has_design"]),
             "sold": item["sold"], "pending": item["pending"], "left": item["left"],
             "revenue": item["revenue"], "revenue_text": money(item["revenue"]),
         }
@@ -878,10 +880,13 @@ class WebApi:
                 raise ApiError("Количество — целое число (или пусто — без лимита)")
             if not 0 <= quantity <= 1_000_000:
                 raise ApiError("Количество — от 0 до 1 000 000")
+        pay_bin = str(data.get("pay_bin", "")).strip()
+        if pay_bin and not re.fullmatch(r"\d{12}", pay_bin):
+            raise ApiError("ИИН/БИН — 12 цифр")
         fields = {
             "title": title, "description": clean(str(data.get("description", "")), 300),
             "price": price, "quantity": quantity, "pay_url": self.pay_url_value(data.get("pay_url")),
-            "active": int(bool(data.get("active", True))),
+            "pay_bin": pay_bin, "active": int(bool(data.get("active", True))),
         }
         if data.get("id"):
             if not self.db.get_type(int(data["id"])):
@@ -891,7 +896,7 @@ class WebApi:
         else:
             type_id = self.db.add_type(
                 fields["title"], fields["description"], price, quantity, fields["pay_url"],
-                bool(fields["active"]),
+                bool(fields["active"]), pay_bin,
             )
         return web.json_response({"id": type_id, **await self._types_payload()})
 
@@ -931,8 +936,18 @@ class WebApi:
     # ---------- оплаты на проверку ----------
 
     def order_json(self, o, overview=None, detail: bool = False) -> dict:
-        info = receipts.Receipt.from_dict(json.loads(o["receipt_info"] or "{}"))
         ticket = self.db.get_ticket(o["ticket_id"]) if o["ticket_id"] else None
+        rows = self.db.receipts_of(o["id"], include_void=True)
+        paid, unknown, short = shop.coverage(self.db, o)
+        receipts_json = []
+        for r in rows:
+            info = receipts.Receipt.from_dict(json.loads(r["info"] or "{}"))
+            receipts_json.append({
+                "id": r["id"], "void": bool(r["void"]),
+                "amount": money(info.amount) if info.amount is not None else "", "number": info.number,
+                "buyer": info.buyer, "paid_at": info.paid_at.replace("T", " "), "method": info.method,
+                "seller": info.seller, "pages": info.pages,
+            })
         out = {
             "id": o["id"], "status": o["status"], "type_id": o["type_id"], "type_title": o["type_title"],
             "price": o["price"], "price_text": money(o["price"]), "full_name": o["full_name"],
@@ -942,14 +957,11 @@ class WebApi:
             "reviewed_at": fmt_dt(o["reviewed_at"], self.config) if o["reviewed_at"] else "",
             "reviewed_by": o["reviewed_by"], "reject_reason": o["reject_reason"],
             "ticket_id": o["ticket_id"], "ticket_code": ticket_code(self.config, o["ticket_id"]) if ticket else "",
-            "delivered": bool(o["delivered"]), "has_receipt": bool(o["receipt_file"]),
-            "receipt": {
-                "amount": money(info.amount) if info.amount is not None else "", "number": info.number,
-                "buyer": info.buyer, "paid_at": info.paid_at.replace("T", " "), "method": info.method,
-                "seller": info.seller, "pages": info.pages,
-            },
+            "delivered": bool(o["delivered"]), "has_receipt": any(not r["void"] for r in rows),
+            "paid": paid, "paid_text": money(paid), "short": short, "short_text": money(short),
+            "unknown_amounts": unknown, "receipts": receipts_json,
         }
-        flags = shop.review_flags(self.db, self.config, o, overview) if o["status"] in ("pending", "rejected") or detail else []
+        flags = shop.review_flags(self.db, self.config, o, overview) if o["status"] in ("topup", "pending", "rejected") or detail else []
         out["worst"] = "bad" if any(f["level"] == "bad" for f in flags) else "warn" if any(f["level"] == "warn" for f in flags) else "ok"
         if detail:
             out["flags"] = flags
@@ -960,21 +972,21 @@ class WebApi:
             order = self.db.get_order(int(data.get("id")))
         except (TypeError, ValueError):
             order = None
-        if not order or order["status"] not in ("pending", "approved", "rejected"):
+        if not order or order["status"] not in ("topup", "pending", "approved", "rejected"):
             raise ApiError("Заказ не найден", 404)
         return order
 
     async def payments_list(self, request: web.Request) -> web.Response:
         self.need(request, "payments")
         status = str((await self.body(request)).get("status", "pending"))
-        if status not in ("pending", "approved", "rejected", "all"):
+        if status not in ("pending", "topup", "approved", "rejected", "all"):
             raise ApiError("Некорректный фильтр")
         overview = self.db.types_overview()
         orders = self.db.orders_by_status(None if status == "all" else status, 150)
         counts = self.db.order_counts()
         return web.json_response({
             "orders": [self.order_json(o, overview) for o in orders],
-            "counts": {k: counts.get(k, 0) for k in ("pending", "approved", "rejected")},
+            "counts": {k: counts.get(k, 0) for k in ("pending", "topup", "approved", "rejected")},
         })
 
     async def payments_get(self, request: web.Request) -> web.Response:
@@ -982,14 +994,23 @@ class WebApi:
         order = self.get_order(await self.body(request))
         return web.json_response({"order": self.order_json(order, detail=True)})
 
+    def pick_receipt(self, order, data: dict):
+        """Чек заказа: указанный в запросе, иначе последний засчитанный."""
+        rows = self.db.receipts_of(order["id"], include_void=True)
+        if data.get("receipt_id"):
+            rows = [r for r in rows if r["id"] == data.get("receipt_id")]
+        else:
+            rows = [r for r in rows if not r["void"]] or rows
+        path = self.config.receipts_dir / rows[-1]["file"] if rows else None
+        if not path or not path.exists():
+            raise ApiError("Файл чека не найден", 404)
+        return path
+
     async def payments_receipt(self, request: web.Request) -> web.Response:
         """Страница PDF-чека картинкой (внутри Telegram PDF не открывается)."""
         self.need(request, "payments")
         data = await self.body(request)
-        order = self.get_order(data)
-        path = shop.receipt_path(self.config, order) if order["receipt_file"] else None
-        if not path or not path.exists():
-            raise ApiError("Файл чека не найден", 404)
+        path = self.pick_receipt(self.get_order(data), data)
         try:
             page = int(data.get("page", 0))
         except (TypeError, ValueError):
@@ -1002,18 +1023,36 @@ class WebApi:
         return web.Response(body=jpeg, content_type="image/jpeg")
 
     async def payments_receipt_file(self, request: web.Request) -> web.Response:
-        """Присылает оригинал PDF-чека админу в чат."""
+        """Присылает оригиналы PDF-чеков заказа админу в чат."""
         self.need(request, "payments")
         order = self.get_order(await self.body(request))
-        path = shop.receipt_path(self.config, order) if order["receipt_file"] else None
-        if not path or not path.exists():
+        rows = [r for r in self.db.receipts_of(order["id"]) if (self.config.receipts_dir / r["file"]).exists()]
+        if not rows:
             raise ApiError("Файл чека не найден", 404)
-        await self.bot.send_document(
-            request["user"].id,
-            BufferedInputFile(await asyncio.to_thread(path.read_bytes), filename=f"check_order_{order['id']}.pdf"),
-            caption=f"Чек по заказу №{order['id']} · {order['full_name']}",
+        for n, r in enumerate(rows, 1):
+            await self.bot.send_document(
+                request["user"].id,
+                BufferedInputFile(
+                    await asyncio.to_thread((self.config.receipts_dir / r["file"]).read_bytes),
+                    filename=f"check_order_{order['id']}_{n}.pdf",
+                ),
+                caption=f"Чек {n} из {len(rows)} по заказу №{order['id']} · {order['full_name'] or order['tg_name']}",
+            )
+        return web.json_response({"sent": len(rows)})
+
+    async def payments_topup(self, request: web.Request) -> web.Response:
+        """Недоплата: просит клиента доплатить остаток (или напоминает, если уже просили)."""
+        self.need(request, "payments")
+        order = self.get_order(await self.body(request))
+        try:
+            if order["status"] != "topup":
+                order, _ = shop.request_topup(self.db, order["id"], request["user"].full_name)
+        except ShopError as e:
+            raise ApiError(str(e), 409)
+        sent = await shop.notify_topup(
+            self.bot, self.db, order, "Организатор проверил оплату: внесённой суммы не хватает."
         )
-        return web.json_response({"sent": True})
+        return web.json_response({"sent": sent, "order": self.order_json(self.db.get_order(order["id"]), detail=True)})
 
     async def payments_approve(self, request: web.Request) -> web.Response:
         access = self.need(request, "payments")

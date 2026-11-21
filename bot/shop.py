@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import secrets
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -54,12 +53,21 @@ def pay_url(db: Database, type_row) -> str:
     return (type_row["pay_url"] or db.get_setting("shop_pay_url") or "").strip()
 
 
-def seller_bin(db: Database) -> str:
+def seller_bin(db: Database, type_row=None) -> str:
+    """ИИН/БИН получателя для сверки чека — тот, что задан вместе со ссылкой оплаты:
+    у типа со своей ссылкой — его БИН (пусто — проверка получателя выключена), иначе общий."""
+    if type_row is not None and type_row["pay_url"]:
+        return (type_row["pay_bin"] or "").strip()
     return (db.get_setting("shop_bin") or "").strip()
 
 
-def receipt_path(config: Config, order) -> Path:
-    return config.receipts_dir / order["receipt_file"]
+def coverage(db: Database, order) -> tuple[int, int, int]:
+    """(внесено по чекам, чеков с нераспознанной суммой, сколько ещё не хватает).
+    Если у какого-то чека сумма не распознана, недостачу автоматически не считаем —
+    такой заказ решит админ по картинке чека."""
+    paid, unknown = db.paid_total(order["id"])
+    short = 0 if unknown else max(0, order["price"] - paid)
+    return paid, unknown, short
 
 
 def new_receipt_name(order_id: int) -> str:
@@ -70,78 +78,87 @@ def new_receipt_name(order_id: int) -> str:
 
 
 def check_new_receipt(db: Database, order, receipt: Receipt) -> str | None:
-    """Жёсткие отказы при загрузке чека клиентом (текст показывается клиенту).
-    Всё остальное не блокирует, а попадает в отметки для администратора (review_flags)."""
-    other = db.find_receipt(receipt.number, order["id"]) if receipt.number else None
-    if other:
-        return "Этот чек уже использован для другого заказа. Пришлите чек за ваш платёж."
-    if receipt.amount is not None and receipt.amount < order["price"]:
-        return (
-            f"Сумма в чеке ({money(receipt.amount)}) меньше стоимости билета "
-            f"({money(order['price'])}). Проверьте платёж и пришлите правильный чек."
-        )
-    wanted = seller_bin(db)
+    """Жёсткие отказы при загрузке чека клиентом (текст показывается клиенту): чек уже
+    использован или выписан не на нашего получателя. Недоплата не отказ — клиент может
+    доплатить остаток вторым чеком; прочее попадает в отметки для администратора."""
+    if receipt.number:
+        if db.order_has_receipt(order["id"], receipt.number):
+            return "Этот чек вы уже присылали. Пришлите чек за доплату."
+        if db.find_receipt(receipt.number, order["id"]):
+            return "Этот чек уже использован для другого заказа. Пришлите чек за ваш платёж."
+    wanted = seller_bin(db, db.get_type(order["type_id"]))
     if wanted and receipt.seller_bin and receipt.seller_bin != wanted:
         return "Чек выписан не на нашего получателя. Оплатите по ссылке из бота и пришлите этот чек."
     return None
 
 
 def review_flags(db: Database, config: Config, order, overview=None) -> list[dict]:
-    """Результат автоматической сверки чека с заказом для администратора:
+    """Результат автоматической сверки чеков с заказом для администратора:
     [{level: ok|warn|bad, text}]."""
     flags: list[dict] = []
 
     def add(level: str, text: str) -> None:
         flags.append({"level": level, "text": text})
 
-    if not order["receipt_file"]:
+    receipts = db.receipts_of(order["id"])
+    if not receipts:
         add("bad", "Чек не загружен")
         return flags
-    info = Receipt.from_dict(json.loads(order["receipt_info"] or "{}"))
-    if not info.recognized:
-        add("warn", "Поля чека не распознаны автоматически — сверьте сумму и дату по картинке")
-    if info.amount is not None:
-        if info.amount == order["price"]:
-            add("ok", f"Сумма {money(info.amount)} совпадает с ценой билета")
-        elif info.amount > order["price"]:
-            add("warn", f"Сумма в чеке {money(info.amount)} больше цены билета {money(order['price'])}")
+    price = order["price"]
+    paid, unknown, _ = coverage(db, order)
+    many = len(receipts) > 1
+    if unknown:
+        add("warn", f"Сумма не распознана у чеков: {unknown} — сверьте по картинке")
+    if paid or not unknown:
+        count = f" (чеков: {len(receipts)})" if many else ""
+        if paid == price:
+            add("ok", f"Оплачено {money(paid)}{count} — совпадает с ценой билета")
+        elif paid > price:
+            add("warn", f"Оплачено {money(paid)}{count}, цена билета {money(price)} — переплата {money(paid - price)}")
+        elif unknown:
+            add("warn", f"Распознано {money(paid)} из {money(price)}")
         else:
-            add("bad", f"Сумма в чеке {money(info.amount)} меньше цены билета {money(order['price'])}")
-    elif info.recognized:
-        add("warn", "Сумма в чеке не распознана")
-    if info.number:
-        other = db.find_receipt(info.number, order["id"])
-        if other:
-            add("bad", f"Чек №{info.number} уже использован в заказе №{other['id']}")
-        else:
-            add("ok", f"Чек №{info.number} раньше не использовался")
-    wanted = seller_bin(db)
-    if wanted:
-        if not info.seller_bin:
-            add("warn", "ИИН/БИН получателя в чеке не распознан")
-        elif info.seller_bin == wanted:
-            add("ok", "Получатель платежа совпадает с вашим ИИН/БИН")
-        else:
-            add("bad", f"Получатель в чеке (ИИН/БИН {info.seller_bin}) — не ваш")
-    if info.recognized and not info.success:
-        add("warn", "В чеке нет отметки «Оплата совершена»")
-    if info.paid_at:
-        try:
-            paid = datetime.fromisoformat(info.paid_at).replace(tzinfo=config.tz)
-            created = datetime.fromisoformat(order["created_at"])
-            if paid < created - timedelta(minutes=15):
-                add("warn", f"Чек выписан раньше заказа ({info.paid_at.replace('T', ' ')}) — возможно, старый")
-            elif paid > datetime.now(config.tz) + timedelta(minutes=10):
-                add("warn", "Дата в чеке — в будущем")
-        except ValueError:
-            pass
-    if info.buyer and order["full_name"]:
-        first = info.buyer.split()[0].casefold() if info.buyer.split() else ""
+            add("bad", f"Оплачено {money(paid)}{count} из {money(price)} — не хватает {money(price - paid)}")
+    wanted = seller_bin(db, db.get_type(order["type_id"]))
+    for r in receipts:
+        info = Receipt.from_dict(json.loads(r["info"] or "{}"))
+        label = f"Чек №{info.number}" if info.number else "Чек"
+        if not info.recognized:
+            add("warn", f"{label}: поля не распознаны автоматически — сверьте сумму и дату по картинке")
+        if info.number:
+            other = db.find_receipt(info.number, order["id"])
+            if other:
+                add("bad", f"{label} уже использован в заказе №{other['order_id']}")
+            elif not many:
+                add("ok", f"{label} раньше не использовался")
+        if wanted:
+            if not info.seller_bin:
+                add("warn", f"{label}: ИИН/БИН получателя не распознан")
+            elif info.seller_bin == wanted:
+                if not many:
+                    add("ok", "Получатель платежа совпадает с ИИН/БИН ссылки оплаты")
+            else:
+                add("bad", f"{label}: получатель (ИИН/БИН {info.seller_bin}) — не тот, что у ссылки оплаты")
+        if info.recognized and not info.success:
+            add("warn", f"{label}: нет отметки «Оплата совершена»")
+        if info.paid_at:
+            try:
+                paid_at = datetime.fromisoformat(info.paid_at).replace(tzinfo=config.tz)
+                created = datetime.fromisoformat(order["created_at"])
+                if paid_at < created - timedelta(minutes=15):
+                    add("warn", f"{label} выписан раньше заказа ({info.paid_at.replace('T', ' ')}) — возможно, старый")
+                elif paid_at > datetime.now(config.tz) + timedelta(minutes=10):
+                    add("warn", f"{label}: дата в будущем")
+            except ValueError:
+                pass
+    first = Receipt.from_dict(json.loads(receipts[0]["info"] or "{}"))
+    if first.buyer and order["full_name"]:
+        name = first.buyer.split()[0].casefold() if first.buyer.split() else ""
         tokens = [t.casefold() for t in order["full_name"].replace(".", " ").split()]
-        if first and first in tokens:
-            add("ok", f"Покупатель в чеке: {info.buyer}")
+        if name and name in tokens:
+            add("ok", f"Покупатель в чеке: {first.buyer}")
         else:
-            add("warn", f"Покупатель в чеке ({info.buyer}) не совпадает с ФИ клиента — часто платит родственник или друг")
+            add("warn", f"Покупатель в чеке ({first.buyer}) не совпадает с ФИ клиента — часто платит родственник или друг")
     t = next((i for i in (overview or db.types_overview()) if i["row"]["id"] == order["type_id"]), None)
     if t and order["status"] == "pending" and t["row"]["quantity"] is not None:
         if t["sold"] + t["pending"] > t["row"]["quantity"]:
@@ -172,13 +189,28 @@ def approve_order(db: Database, order_id: int, who: str) -> tuple[Ticket, object
 
 
 def reject_order(db: Database, order_id: int, who: str, reason: str) -> object:
+    """Оплата не принята: чеки отзываются (не засчитываются), клиент может прислать новый."""
     reason = " ".join(reason.split())[:300]
     if not db.claim_order(
-        order_id, ("pending",), status="rejected", reviewed_at=now_iso(), reviewed_by=who,
+        order_id, ("pending", "topup"), status="rejected", reviewed_at=now_iso(), reviewed_by=who,
         reject_reason=reason,
     ):
         raise ShopError("Этот заказ уже обработан другим администратором")
+    db.void_receipts(order_id)
     return db.get_order(order_id)
+
+
+def request_topup(db: Database, order_id: int, who: str) -> tuple[object, int]:
+    """Админ видит недоплату: заказ уходит обратно клиенту — доплатить остаток. Чеки сохраняются."""
+    order = db.get_order(order_id)
+    if not order:
+        raise ShopError("Заказ не найден")
+    _, unknown, short = coverage(db, order)
+    if short <= 0:
+        raise ShopError("Недоплаты нет: сумма по чекам не меньше цены билета")
+    if not db.claim_order(order_id, ("pending",), status="topup", reviewed_by=who):
+        raise ShopError("Этот заказ уже обработан другим администратором")
+    return db.get_order(order_id), short
 
 
 # ---------- сообщения клиенту и админам ----------
@@ -200,6 +232,26 @@ async def deliver_ticket(
         db.update_order(order["id"], delivered=0)
         return False
     db.update_order(order["id"], delivered=1)
+    return True
+
+
+async def notify_topup(bot: Bot, db: Database, order, intro: str = "") -> bool:
+    """Просит клиента доплатить остаток и прислать ещё один чек."""
+    paid, _, short = coverage(db, order)
+    url = pay_url(db, db.get_type(order["type_id"]) or {"pay_url": ""})
+    text = (intro + "\n\n" if intro else "") + (
+        f"💳 <b>Нужна доплата: {money(short)}</b>\n"
+        f"Билет «{ui.escape(order['type_title'])}» стоит {money(order['price'])}, по вашим чекам внесено {money(paid)}.\n\n"
+        f"Доплатите {money(short)} через Kaspi и пришлите ещё один PDF-чек в этот чат — "
+        "суммы чеков сложатся."
+    )
+    rows = []
+    if url:
+        rows.append([InlineKeyboardButton(text="💳 Доплатить через Kaspi", url=url)])
+    try:
+        await bot.send_message(order["user_id"], text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
+    except TelegramAPIError:
+        return False
     return True
 
 
